@@ -1,0 +1,505 @@
+{
+  "questions": [
+    {
+      "question_id": "1",
+      "classification": {
+        "primary_type": "数值计算",
+        "secondary_type": "定积分",
+        "knowledge_points": ["取整函数", "区间分解"],
+        "difficulty_level": 2,
+        "estimated_steps": 3
+      },
+      "content": {
+        "question_text": "记 [x] 为不超过 x 的最大整数，则积分 ∫₀²⁰²⁴ (x - [x]) dx =",
+        "latex_question": "\\int_{0}^{2024}(x-[x])dx",
+        "has_diagram": false,
+        "variables": ["x"],
+        "constants": []
+      },
+      "solution": {
+        "reasoning_process": "函数 x-[x] 在每个单位区间 [n, n+1) 上等于 x-n，其积分为三角形面积 [cite: 45]。整个积分等于 2024 个相同区间的和 [cite: 46]。",
+        "step_by_step": [
+          "拆分积分：Σ_{n=0}^{2023} ∫ₙⁿ⁺¹ (x-n)dx [cite: 46]",
+          "计算单项：[ (x-n)² / 2 ]在 n 到 n+1 等于 1/2 [cite: 46]",
+          "求和：2024 * 1/2 = 1012 [cite: 46]"
+        ],
+        "final_answer": "1012",
+        "latex_answer": "1012"
+      },
+      "verification": { "method": "周期性验证", "result": "正确" }
+    },
+    {
+      "question_id": "2",
+      "classification": {
+        "primary_type": "微分方程",
+        "secondary_type": "常系数线性微分方程",
+        "knowledge_points": ["特征方程", "待定系数法"],
+        "difficulty_level": 2,
+        "estimated_steps": 3
+      },
+      "content": {
+        "question_text": "二阶线性常系数微分方程 y'' - y = x 的通解为",
+        "latex_question": "y''-y=x",
+        "has_diagram": false,
+        "variables": ["x", "y"],
+        "constants": []
+      },
+      "solution": {
+        "reasoning_process": "先求齐次方程通解，再用待定系数法求非齐次方程的特解 [cite: 48, 49]。",
+        "step_by_step": [
+          "齐次通解：特征方程 λ²-1=0 得 λ=±1，故 y_h = C₁eˣ + C₂e⁻ˣ [cite: 48]",
+          "特解：设 y_p = Ax+B，代入得 A=-1, B=0，故 y_p = -x [cite: 49]",
+          "通解：y = C₁eˣ + C₂e⁻ˣ - x [cite: 50]"
+        ],
+        "final_answer": "y = C₁eˣ + C₂e⁻ˣ - x",
+        "latex_answer": "y=C_{1}e^{x}+C_{2}e^{-x}-x"
+      },
+      "verification": { "method": "代入原方程", "result": "正确" }
+    },
+    {
+      "question_id": "3",
+      "classification": {
+        "primary_type": "数值计算",
+        "secondary_type": "广义积分",
+        "knowledge_points": ["部分分式分解", "极限"],
+        "difficulty_level": 3,
+        "estimated_steps": 3
+      },
+      "content": {
+        "question_text": "计算广义积分 ∫₁⁺∞ 2dx / [x(1+x²)]",
+        "latex_question": "\\int_{1}^{+\\infty}\\frac{2dx}{x(1+x^2)}",
+        "has_diagram": false,
+        "variables": ["x"],
+        "constants": []
+      },
+      "solution": {
+        "reasoning_process": "使用部分分式将分母展开，分别积分后取极限 [cite: 53, 54]。",
+        "step_by_step": [
+          "分式分解：2/[x(1+x²)] = 2/x - 2x/(1+x²) [cite: 53]",
+          "不定积分：2ln|x| - ln(1+x²) = ln[x²/(1+x²)] [cite: 54]",
+          "上限取极限得 0，下限代入得 -ln(1/2) = ln 2 [cite: 54]"
+        ],
+        "final_answer": "ln 2",
+        "latex_answer": "\\ln 2"
+      },
+      "verification": { "method": "导数验证", "result": "正确" }
+    },
+    {
+      "question_id": "4",
+      "classification": {
+        "primary_type": "数值计算",
+        "secondary_type": "旋转体体积",
+        "knowledge_points": ["圆柱壳法/圆盘法"],
+        "difficulty_level": 2,
+        "estimated_steps": 2
+      },
+      "content": {
+        "question_text": "区域 {(x,y)|0≤y≤√sin x, 0≤x≤π} 绕 x 轴旋转所得体积",
+        "latex_question": "V = \\int_{0}^{\\pi}\\pi(\\sqrt{\\sin x})^2 dx",
+        "has_diagram": false,
+        "variables": ["x"],
+        "constants": ["π"]
+      },
+      "solution": {
+        "reasoning_process": "利用旋转体体积公式 V = ∫ π[f(x)]² dx 进行计算 [cite: 56]。",
+        "step_by_step": [
+          "列式：V = π ∫₀π sin x dx [cite: 56]",
+          "计算：π [-cos x]从 0 到 π 等于 2π [cite: 56]"
+        ],
+        "final_answer": "2π",
+        "latex_answer": "2\\pi"
+      },
+      "verification": { "method": "公式检查", "result": "正确" }
+    },
+    {
+      "question_id": "5",
+      "classification": {
+        "primary_type": "数值计算",
+        "secondary_type": "渐近线",
+        "knowledge_points": ["斜渐近线定义"],
+        "difficulty_level": 3,
+        "estimated_steps": 3
+      },
+      "content": {
+        "question_text": "求曲线 y = x ln(e + 1/x) 在 (1, +∞) 上的斜渐近线方程",
+        "latex_question": "y=x\\ln(e+\\frac{1}{x})",
+        "has_diagram": false,
+        "variables": ["x"],
+        "constants": ["e"]
+      },
+      "solution": {
+        "reasoning_process": "计算极限求斜率 a = lim(y/x) 和截距 b = lim(y-ax) [cite: 58, 59]。",
+        "step_by_step": [
+          "求 a：lim_{x→+∞} ln(e + 1/x) = ln e = 1 [cite: 60]",
+          "求 b：lim_{x→+∞} x[ln(e + 1/x) - 1] = lim x ln(1 + 1/ex) = 1/e [cite: 61]",
+          "方程：y = x + 1/e [cite: 62]"
+        ],
+        "final_answer": "y = x + 1/e",
+        "latex_answer": "y=x+\\frac{1}{e}"
+      },
+      "verification": { "method": "极限复核", "result": "正确" }
+    },
+    {
+      "question_id": "6",
+      "classification": {
+        "primary_type": "数值计算",
+        "secondary_type": "极坐标面积",
+        "knowledge_points": ["心脏线", "极坐标积分"],
+        "difficulty_level": 3,
+        "estimated_steps": 2
+      },
+      "content": {
+        "question_text": "求心脏线 r = 1 + cos θ 所围面积",
+        "latex_question": "S = \\int_{0}^{2\\pi}\\frac{1}{2}r^2 d\\theta",
+        "has_diagram": false,
+        "variables": ["θ"],
+        "constants": []
+      },
+      "solution": {
+        "reasoning_process": "利用极坐标面积公式 1/2 ∫ r² dθ 进行积分 [cite: 67]。",
+        "step_by_step": [
+          "列式：1/2 ∫₀²π (1 + cos θ)² dθ [cite: 67]",
+          "计算：展开并积分得 3π/2 [cite: 67]"
+        ],
+        "final_answer": "3π/2",
+        "latex_answer": "\\frac{3\\pi}{2}"
+      },
+      "verification": { "method": "公式复核", "result": "正确" }
+    },
+    {
+      "question_id": "7",
+      "classification": {
+        "primary_type": "极限计算",
+        "secondary_type": "洛必达法则",
+        "knowledge_points": ["变限积分求导"],
+        "difficulty_level": 2,
+        "estimated_steps": 2
+      },
+      "content": {
+        "question_text": "计算极限 lim_{x→0} [∫₀³ˣ ln(1+t²)dt] / x³",
+        "latex_question": "\\lim_{x\\rightarrow 0}\\frac{\\int_{0}^{3x}\\ln(1+t^2)dt}{x^3}",
+        "has_diagram": false,
+        "variables": ["x"],
+        "constants": []
+      },
+      "solution": {
+        "reasoning_process": "应用洛必达法则并对变限积分求导 [cite: 69, 70]。",
+        "step_by_step": [
+          "洛必达：lim [3ln(1+9x²)] / 3x² [cite: 70]",
+          "化简：lim ln(1+9x²) / x² = 9 [cite: 70]"
+        ],
+        "final_answer": "9",
+        "latex_answer": "9"
+      },
+      "verification": { "method": "等价无穷小", "result": "正确" }
+    },
+    {
+      "question_id": "8",
+      "classification": {
+        "primary_type": "极限计算",
+        "secondary_type": "黎曼和",
+        "knowledge_points": ["定积分定义"],
+        "difficulty_level": 3,
+        "estimated_steps": 3
+      },
+      "content": {
+        "question_text": "计算 n 项和极限 lim_{n→+∞} Σ_{i=1}ⁿ 1/√(4n²-i²)",
+        "latex_question": "\\lim_{n\\rightarrow+\\infty}\\sum_{i=1}^n \\frac{1}{\\sqrt{4n^2-i^2}}",
+        "has_diagram": false,
+        "variables": ["n"],
+        "constants": []
+      },
+      "solution": {
+        "reasoning_process": "提取 1/n 构造黎曼和，转化为定积分计算 [cite: 74, 75]。",
+        "step_by_step": [
+          "提公因子：lim 1/n Σ 1/√(4-(i/n)²) [cite: 75]",
+          "定积分：∫₀¹ 1/√(4-x²) dx [cite: 76]",
+          "结果：[arcsin(x/2)]₀¹ = π/6 [cite: 76]"
+        ],
+        "final_answer": "π/6",
+        "latex_answer": "\\frac{\\pi}{6}"
+      },
+      "verification": { "method": "积分法", "result": "正确" }
+    },
+    {
+      "question_id": "9",
+      "classification": {
+        "primary_type": "微分方程",
+        "secondary_type": "伯努利方程",
+        "knowledge_points": ["变量代换"],
+        "difficulty_level": 3,
+        "estimated_steps": 4
+      },
+      "content": {
+        "question_text": "求初值问题 y' + 2y = y²eˣ, y(1) = e⁻¹ 的解",
+        "latex_question": "y'+2y=y^2e^x, y(1)=e^{-1}",
+        "has_diagram": false,
+        "variables": ["x", "y"],
+        "constants": []
+      },
+      "solution": {
+        "reasoning_process": "令 u=y⁻¹ 转化为一阶线性方程求解 [cite: 80, 81]。",
+        "step_by_step": [
+          "变换：u' - 2u = -eˣ [cite: 81]",
+          "通解：u = eˣ + Ce²ˣ [cite: 82]",
+          "代入初值：y(1)=e⁻¹ 得 C=0 [cite: 83]",
+          "结果：y = e⁻ˣ [cite: 83]"
+        ],
+        "final_answer": "y = e⁻ˣ",
+        "latex_answer": "y=e^{-x}"
+      },
+      "verification": { "method": "代入原方程", "result": "正确" }
+    },
+    {
+      "question_id": "10",
+      "classification": {
+        "primary_type": "微分方程",
+        "secondary_type": "高阶方程降阶",
+        "knowledge_points": ["不显含 y 的方程"],
+        "difficulty_level": 3,
+        "estimated_steps": 5
+      },
+      "content": {
+        "question_text": "求 (1+x²)y'' - 2xy' = 0, y(0)=0, y'(0)=1 的解在 x=3 的值",
+        "latex_question": "(1+x^2)y''-2xy'=0",
+        "has_diagram": false,
+        "variables": ["x", "y"],
+        "constants": []
+      },
+      "solution": {
+        "reasoning_process": "令 u=y' 降阶为一阶方程 [cite: 87, 88]。",
+        "step_by_step": [
+          "求 u：u = y' = 1+x² [cite: 90]",
+          "求 y：y = x + x³/3 [cite: 92]",
+          "计算：y(3) = 3 + 9 = 12 [cite: 92]"
+        ],
+        "final_answer": "12",
+        "latex_answer": "12"
+      },
+      "verification": { "method": "计算复核", "result": "正确" }
+    },
+    {
+      "question_id": "11",
+      "classification": {
+        "primary_type": "函数分析",
+        "secondary_type": "性态研究",
+        "knowledge_points": ["极值", "拐点"],
+        "difficulty_level": 3,
+        "estimated_steps": 4
+      },
+      "content": {
+        "question_text": "分析 y = (x+1)(x-2)² 的单调性与凹凸性",
+        "latex_question": "y=(x+1)(x-2)^2",
+        "has_diagram": false,
+        "variables": ["x"],
+        "constants": []
+      },
+      "solution": {
+        "reasoning_process": "求一、二阶导数并分析正负区间 [cite: 98, 105]。",
+        "step_by_step": [
+          "一阶导：y' = 3x(x-2)，驻点 0, 2 [cite: 98]",
+          "二阶导：y'' = 6x-6，拐点 x=1 [cite: 105]",
+          "极值：极大值 y(0)=4，极小值 y(2)=0 [cite: 103, 104]"
+        ],
+        "final_answer": "极大值4, 极小值0, 拐点(1,2)",
+        "latex_answer": "\\text{极大值}4, \\text{极小值}0, \\text{拐点}(1,2)"
+      },
+      "verification": { "method": "导数检查", "result": "正确" }
+    },
+    {
+      "question_id": "12",
+      "classification": {
+        "primary_type": "微分方程",
+        "secondary_type": "齐次微分方程",
+        "knowledge_points": ["变量代换"],
+        "difficulty_level": 3,
+        "estimated_steps": 4
+      },
+      "content": {
+        "question_text": "求 y' = y/x + tan(y/x), y(1) = π/6 的解",
+        "latex_question": "y'=\\frac{y}{x}+\\tan(\\frac{y}{x})",
+        "has_diagram": false,
+        "variables": ["x", "y"],
+        "constants": []
+      },
+      "solution": {
+        "reasoning_process": "令 u=y/x 转化为可分离变量方程 [cite: 111, 112]。",
+        "step_by_step": [
+          "变换：x du/dx = tan u [cite: 112]",
+          "积分：sin(y/x) = Cx [cite: 115]",
+          "代入初值：C = 1/2 [cite: 116]"
+        ],
+        "final_answer": "sin(y/x) = x/2",
+        "latex_answer": "\\sin(\\frac{y}{x})=\\frac{x}{2}"
+      },
+      "verification": { "method": "代入验证", "result": "正确" }
+    },
+    {
+      "question_id": "13",
+      "classification": {
+        "primary_type": "数值计算",
+        "secondary_type": "参数方程应用",
+        "knowledge_points": ["旋轮线", "面积", "弧长"],
+        "difficulty_level": 3,
+        "estimated_steps": 4
+      },
+      "content": {
+        "question_text": "求旋轮线一拱 x=t-sint, y=1-cost (0≤t≤2π) 的面积与弧长",
+        "latex_question": "x=t-\\sin t, y=1-\\cos t",
+        "has_diagram": false,
+        "variables": ["t"],
+        "constants": []
+      },
+      "solution": {
+        "reasoning_process": "使用参数方程的面积与弧长公式计算 [cite: 124, 125]。",
+        "step_by_step": [
+          "面积：∫₀²π y(t)x'(t)dt = 3π [cite: 124]",
+          "弧长：∫₀²π √(x'²+y'²)dt = 8 [cite: 125, 126]"
+        ],
+        "final_answer": "面积 3π, 弧长 8",
+        "latex_answer": "S=3\\pi, L=8"
+      },
+      "verification": { "method": "公式复核", "result": "正确" }
+    },
+    {
+      "question_id": "14",
+      "classification": {
+        "primary_type": "数值计算",
+        "secondary_type": "广义积分",
+        "knowledge_points": ["配方法"],
+        "difficulty_level": 3,
+        "estimated_steps": 3
+      },
+      "content": {
+        "question_text": "计算 ∫₁² dx / √[(x-1)(2-x)]",
+        "latex_question": "\\int_{1}^{2}\\frac{dx}{\\sqrt{(x-1)(2-x)}}",
+        "has_diagram": false,
+        "variables": ["x"],
+        "constants": []
+      },
+      "solution": {
+        "reasoning_process": "通过配方转化为 arcsin 形式的积分 [cite: 127, 128]。",
+        "step_by_step": [
+          "配方：(x-1)(2-x) = 1/4 - (x-1.5)² [cite: 127]",
+          "积分：[arcsin(2x-3)]从 1 到 2 等于 π [cite: 129]"
+        ],
+        "final_answer": "π",
+        "latex_answer": "\\pi"
+      },
+      "verification": { "method": "导数验证", "result": "正确" }
+    },
+    {
+      "question_id": "15",
+      "classification": {
+        "primary_type": "数值计算",
+        "secondary_type": "广义积分收敛性",
+        "knowledge_points": ["比较判别法", "变量代换"],
+        "difficulty_level": 4,
+        "estimated_steps": 4
+      },
+      "content": {
+        "question_text": "求参数 p 使得 ∫₀⁺∞ (1/xᵖ) sin(1/x) dx 收敛",
+        "latex_question": "\\int_{0}^{+\\infty}\\frac{1}{x^p}\\sin(\\frac{1}{x})dx",
+        "has_diagram": false,
+        "variables": ["p"],
+        "constants": []
+      },
+      "solution": {
+        "reasoning_process": "分区间讨论 x→0 和 x→+∞ 时的收敛性 [cite: 132]。",
+        "step_by_step": [
+          "x→+∞：等价于 1/xᵖ⁺¹，收敛需 p>0 [cite: 135, 136]",
+          "x→0：令 t=1/x，原式变为 ∫₁⁺∞ tᵖ⁻² sin t dt [cite: 138, 139]",
+          "收敛需 p<2 [cite: 140, 141]"
+        ],
+        "final_answer": "0 < p < 2",
+        "latex_answer": "0 < p < 2"
+      },
+      "verification": { "method": "书本结论参考", "result": "正确" }
+    },
+    {
+      "question_id": "16",
+      "classification": {
+        "primary_type": "证明题",
+        "secondary_type": "微分方程性态",
+        "knowledge_points": ["一阶线性通解", "洛必达法则"],
+        "difficulty_level": 4,
+        "estimated_steps": 4
+      },
+      "content": {
+        "question_text": "已知 a(x)≥c>0, b(x)→0，证明方程 y' + a(x)y = b(x) 的解趋向 0",
+        "latex_question": "y'+a(x)y=b(x)",
+        "has_diagram": false,
+        "variables": ["x"],
+        "constants": ["c"]
+      },
+      "solution": {
+        "reasoning_process": "写出通解并利用洛必达法则证明极限 [cite: 149, 154]。",
+        "step_by_step": [
+          "通解：y(x) = Ce⁻∫ᵃ + e⁻∫ᵃ ∫ b e∫ᵃ [cite: 149]",
+          "第一项由于 a≥c 趋于 0 [cite: 151]",
+          "第二项用洛必达法则得 lim b(x)/a(x) = 0 [cite: 154]"
+        ],
+        "final_answer": "证毕",
+        "latex_answer": "\\text{证毕}"
+      },
+      "verification": { "method": "极限性质验证", "result": "正确" }
+    },
+    {
+      "question_id": "17",
+      "classification": {
+        "primary_type": "证明题",
+        "secondary_type": "积分不等式",
+        "knowledge_points": ["Gronwall 不等式"],
+        "difficulty_level": 4,
+        "estimated_steps": 5
+      },
+      "content": {
+        "question_text": "若 |f(x)| ≤ 1 + ∫₀ˣ |f(t)| dt，证明 |f(x)| ≤ eˣ",
+        "latex_question": "|f(x)| \\le 1 + \\int_{0}^x |f(t)| dt",
+        "has_diagram": false,
+        "variables": ["x"],
+        "constants": []
+      },
+      "solution": {
+        "reasoning_process": "设变限积分函数 F(x)，构造微分不等式求解 [cite: 163, 166]。",
+        "step_by_step": [
+          "设 F(x) = ∫ |f| dt，则 F' ≤ 1+F [cite: 163, 165]",
+          "积分得 ln(1+F) ≤ x [cite: 172, 173]",
+          "解得 F ≤ eˣ-1，故 |f| ≤ 1+F ≤ eˣ [cite: 174, 175]"
+        ],
+        "final_answer": "证毕",
+        "latex_answer": "\\text{证毕}"
+      },
+      "verification": { "method": "不等式推导", "result": "正确" }
+    },
+    {
+      "question_id": "18",
+      "classification": {
+        "primary_type": "证明题",
+        "secondary_type": "零点分离定理",
+        "knowledge_points": ["线性无关解", "朗斯基行列式"],
+        "difficulty_level": 5,
+        "estimated_steps": 5
+      },
+      "content": {
+        "question_text": "证明线性无关解 y₁, y₂ 的零点相互分离",
+        "latex_question": "y''+p(x)y'+q(x)y=0",
+        "has_diagram": false,
+        "variables": ["y₁", "y₂"],
+        "constants": []
+      },
+      "solution": {
+        "reasoning_process": "利用朗斯基行列式不为零及罗尔定理进行反证 [cite: 179, 185]。",
+        "step_by_step": [
+          "W[y₁, y₂] 恒不为零 [cite: 179, 180]",
+          "若 y₂ 在 y₁ 的两零点间无零点，设 f=y₁/y₂ [cite: 184]",
+          "罗尔定理得存在 c 使 f'(c)=0，导致 W=0 矛盾 [cite: 185, 188]"
+        ],
+        "final_answer": "证毕",
+        "latex_answer": "\\text{证毕}"
+      },
+      "verification": { "method": "反证法", "result": "正确" }
+    }
+    
+  ]
+}

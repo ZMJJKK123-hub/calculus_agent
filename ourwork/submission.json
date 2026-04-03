@@ -1,0 +1,6 @@
+{
+	"Team_name": "xxx",
+    "python_version": "3.13",
+	"class": "KimiCalculusAgent",
+	"method": "solve"
+}
