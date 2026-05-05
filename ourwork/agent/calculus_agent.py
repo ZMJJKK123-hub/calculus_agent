@@ -1,4 +1,6 @@
-"""Kimi:K2.5 based calculus solving agent."""
+﻿"""Kimi:K2.5 based calculus solving agent."""
+
+from __future__ import annotations
 
 import ast
 import asyncio
@@ -14,43 +16,128 @@ import tempfile
 import time
 from collections import Counter
 from dataclasses import dataclass, field
+from functools import wraps
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 import requests
+
 try:
     import sympy as sp
+    from sympy.parsing.sympy_parser import (
+        parse_expr,
+        standard_transformations,
+        implicit_multiplication_application,
+    )
 except Exception:  # noqa: BLE001
     sp = None
+    parse_expr = None
+    standard_transformations = ()
+    implicit_multiplication_application = None
 
 logger = logging.getLogger(__name__)
 
+FAST_MODE = False
+DEFAULT_STRATEGY = "auto"
+SECOND_PASS_SCHEMA_FIX = True
 
-SYSTEM_PROMPT = (
-    "你是微积分解题助手，使用中文给出规范、可评分的解题过程。"
-    "输出必须是 JSON 对象，且仅包含 reasoning_process 与 answer 两个字段，严禁 Markdown 代码块和额外文本。"
-    "推理需严谨：列出关键公式、变量假设、积分区间、极限方向等；步骤条理化，使用编号或短句。"
-    "保持题面符号与 LaTeX 原样，不要改写。若无解或条件不足，说明原因并给出最优近似。"
-    "answer 简洁给出最终结果，可使用 LaTeX。"
-    "结构要求：先列要点/分步推理，再给最终答案。"
-)
-# 生成与检索相关的可调节参数
-FEWSHOT_TOP_K = 3
-FEWSHOT_MAX_REASONING_CHARS = 2000
+DEFAULT_MODEL = os.getenv("MODEL_NAME", "deepseek-chat")
+DEFAULT_BASE_URL = os.getenv("API_BASE_URL", "https://api.deepseek.com/v1/chat/completions")
+DEFAULT_TIMEOUT = 60
+
 MAX_TOKENS = 4096
-TEMPERATURE = 0.15
-TOP_P = 0.3
-RETRY_COUNT = 1
-FAST_MODE = os.getenv("AGENT_FAST_MODE", "0").lower() not in {"0", "false", "off", "no"}
-SECOND_PASS_SCHEMA_FIX = not FAST_MODE
-KB_TOP_K = 3
-KB_MERGED_TOP_K = 8
+TEMPERATURE = 0.2
+TOP_P = 0.4
+RETRY_COUNT = 2
+
+FEWSHOT_TOP_K = 3
+FEWSHOT_MAX_REASONING_CHARS = 320
+
 THEORY_FILE_NAME = "theory.json"
 KB_FILE_NAME = "knowledge_points.json"
+KB_TOP_K = 4
+KB_MERGED_TOP_K = 8
 
-DEFAULT_STRATEGY = os.getenv("AGENT_STRATEGY", "auto").lower()
-POT_RETRY = 1 if FAST_MODE else 2
-POT_TIMEOUT = 45
+
+def _log_call(func):
+    @wraps(func)
+    def wrapper(*args, **kwargs):
+        return func(*args, **kwargs)
+
+    return wrapper
+
+
+SYSTEM_PROMPT = (
+    "# 身份与使命\n"
+    "你是一位世界级的数学分析专家，拥有数十年微积分教学与研究经验。"
+    "你的唯一目标是：对每一道微积分问题，给出绝对正确、严谨、完整的解答。宁慢勿错。\n\n"
+    "# 核心工作流程（必须严格遵守，不可跳过任何一步）\n\n"
+    "## 第一步：问题诊断（内部思考，用【】标出）\n"
+    "【问题类型】识别题目属于：极限/导数/不定积分/定积分/反常积分/数值级数/函数项级数/幂级数/含参变量积分/微分方程/证明题\n"
+    "【核心难点】指出本题最关键的技术难点\n"
+    "【易错陷阱】列出本题最容易出错的2-3个地方\n"
+    "【收敛性检查】如果涉及积分或级数，先判断敛散性\n\n"
+    "## 第二步：解题方案设计\n"
+    "列出至少两种可能的解法路径：\n"
+    "- 方法A：[描述] - 可行性：[高/中/低]，风险：[说明]\n"
+    "- 方法B：[描述] - 可行性：[高/中/低]，风险：[说明]\n"
+    "选定最优方案：【方案X】，理由：[说明]\n\n"
+    "## 第三步：严谨推导（零跳步要求）\n"
+    "逐行写出推导过程，每行编号。每个等号必须注明依据：\n"
+    "依据类型包括：\n"
+    "- [代换]：写出完整的 u=..., du=..., 积分限变换过程\n"
+    "- [分部积分]：明确写出 u=..., dv=..., du=..., v=...，再代入公式 ∫udv = uv - ∫vdu\n"
+    "- [定理]：如牛顿-莱布尼茨公式、积分中值定理、控制收敛定理、Weierstrass M-判别法\n"
+    "- [已知结果]：如 ∑1/n²=π²/6、∫₀^∞ sinx/x dx=π/2 等，必须明确写出\n"
+    "- [代数恒等]：因式分解、部分分式、三角恒等式\n"
+    "- [极限运算]：洛必达法则需验证条件（0/0或∞/∞型）；夹逼定理需给出上下界\n"
+    "- [不等式]：注明不等号方向，等号成立条件\n\n"
+    "## 第四步：交叉验证\n"
+    "- [特殊值检验]：代入边界值或特殊点验证\n"
+    "- [量纲/符号检查]：结果的正负号、量级是否合理\n"
+    "- [数值验证]：给出解析结果的数值近似（保留6位小数），与估算值对比\n"
+    "- [极限情况]：检查参数趋于边界时结果是否退化到已知简单情况\n\n"
+    "## 第五步：最终答案\n"
+    "用清晰格式给出：\n"
+    "- 解析表达式：（最简形式）\n"
+    "- 数值近似：（保留6位小数）\n"
+    "- 收敛域/约束条件：（如有点明）\n\n"
+    "# 关键定理与常见结果速查（解题时优先调用）\n"
+    "- ∑_{n=1}^∞ 1/n² = π²/6\n"
+    "- ∑_{n=1}^∞ 1/n⁴ = π⁴/90\n"
+    "- ∑_{n=1}^∞ (-1)^{n+1}/n = ln2\n"
+    "- ∫₀^∞ e^{-x²} dx = √π/2\n"
+    "- ∫₀^∞ sinx/x dx = π/2\n"
+    "- Γ(1/2)=√π, Γ(n+1)=n!\n"
+    "- B(p,q)=Γ(p)Γ(q)/Γ(p+q)\n"
+    "- ψ(z)=Γ'(z)/Γ(z)，ψ(1)=-γ，其中γ≈0.577216为欧拉常数\n\n"
+    "# 必须避免的常见错误（每次推导后自查）\n"
+    "1. 变量代换时忘记更新积分上下限\n"
+    "2. 分部积分时符号搞反：∫udv=uv-∫vdu，不是uv+∫vdu\n"
+    "3. 幂级数逐项积分/求导时忽略收敛域端点的变化\n"
+    "4. 反常积分没有检查所有瑕点（包括区间内部可去奇点）\n"
+    "5. 把条件收敛当绝对收敛使用（重排、交换次序需要绝对收敛）\n"
+    "6. 含参变量积分求导时没有验证Leibniz法则的条件（被积函数和偏导数需一致连续或有控制函数）\n"
+    "7. 用等价无穷小代换时忽略了加减法中不能随意代换的限制\n"
+    "8. 写成 ∫f(x)dx 时遗漏常数项C或定积分代入时计算错误\n"
+    "9. 级数求和时索引偏移处理错误，尤其是从n=0和n=1开始的转换\n"
+    "10. 分母为零、取对数时定义域等隐藏约束未检查\n\n"
+    "# 特殊情况的强制检查清单\n"
+    "- 遇到对称区间[-a,a]：检查被积函数奇偶性\n"
+    "- 遇到含参变量积分：检查可否求导，检查参变量范围\n"
+    "- 遇到无穷级数：先做比值/根值判别，再求和\n"
+    "- 遇到幂级数：单独检查收敛区间端点\n"
+    "- 遇到瑕积分：逐个找出所有瑕点，分段处理\n"
+    "- 遇到极限与积分/求和交换顺序：必须有控制收敛定理或一致收敛定理支撑\n"
+    "- 遇到绝对值/取整/符号函数：分段讨论\n\n"
+    "# 输出格式要求\n"
+    "不得引入题目未给出的条件；若需假设，明确写出并说明依据。"
+    "答案必须给出最终结论，表达清晰一致。"
+    "输出必须是 JSON，对象包含 reasoning_process 与 answer 两个字段。"
+)
+
+POT_RETRY = 2
+POT_TIMEOUT = 15
 POT_MAX_TOKENS = 8192
 POT_MAX_CODE_CHARS = 120000
 POT_ALLOWED_IMPORTS = {"math", "sympy", "mpmath", "numpy"}
@@ -85,69 +172,6 @@ THEORY_DIRECT_MAP_RULES: List[Dict[str, Any]] = [
         "targets": [
             "带Peano余项的Taylor公式",
             "带Lagrange余项的Taylor公式",
-            "Heine定理（极限与序列极限等价）",
-        ],
-        "reminder": "极限题优先判断能否做Taylor展开，多元极限可用Heine定理做路径或序列检验。",
-    },
-    {
-        "signals": ["泰勒", "taylor", "展开", "高阶", "小o", "大o", "peano", "lagrange", "近似", "asymptotic"],
-        "targets": ["带Peano余项的Taylor公式", "带Lagrange余项的Taylor公式"],
-        "reminder": "出现高阶展开信号时，直接匹配Taylor公式并控制余项阶数。",
-    },
-    {
-        "signals": ["导数", "微分", "偏导", "derivative", "differential", "partial"],
-        "targets": ["全微分的定义", "可微与偏导数的关系", "可微的充分条件（偏导数连续）"],
-        "reminder": "导数/可微题先确认可微条件，再调用全微分与偏导关系。",
-    },
-    {
-        "signals": ["方向导数", "梯度", "gradient", "directional"],
-        "targets": ["方向导数与梯度"],
-        "reminder": "方向导数题优先套用梯度点乘单位方向公式。",
-    },
-    {
-        "signals": ["混合偏导", "二阶偏导", "clairaut", "schwarz"],
-        "targets": ["混合偏导数相等定理"],
-        "reminder": "二阶混合偏导问题优先检查连续性后应用交换次序定理。",
-    },
-    {
-        "signals": ["链式法则", "复合", "compose", "jacobi", "jacobian", "雅可比"],
-        "targets": ["复合向量值函数求导（链式法则）", "向量值函数可微的充要条件"],
-        "reminder": "复合函数求导按Jacobi矩阵乘法执行。",
-    },
-    {
-        "signals": ["隐函数", "implicit", "反函数", "inverse"],
-        "targets": ["隐函数存在定理（二元）", "隐函数存在定理（n+1元）", "隐向量值函数存在定理", "反函数定理"],
-        "reminder": "隐函数/反函数题先验算雅可比或偏导非零条件，再套导数公式。",
-    },
-    {
-        "signals": ["极值", "驻点", "鞍点", "saddle", "critical", "stationary", "hessian", "hesse"],
-        "targets": ["极值的必要条件", "极值的充分条件（Hesse矩阵）", "方向导数与梯度"],
-        "reminder": "极值题先做驻点条件，再用Hesse矩阵判别极值或鞍点。",
-    },
-    {
-        "signals": ["约束", "条件极值", "拉格朗日", "lagrange multiplier", "subject to"],
-        "targets": ["条件极值的Lagrange乘子法"],
-        "reminder": "条件极值题直接转Lagrange乘子方程组。",
-    },
-    {
-        "signals": ["含参积分", "积分号下求导", "变上限", "parameter integral"],
-        "targets": ["含参积分的连续性", "含参积分的可微性（积分号下求导）", "变上限积分的求导"],
-        "reminder": "含参积分题先验连续/一致收敛条件，再交换求导与积分。",
-    },
-    {
-        "signals": ["一致收敛", "广义含参", "weierstrass", "dirichlet", "abel"],
-        "targets": [
-            "广义含参积分一致收敛的Weierstrass判别法",
-            "广义含参积分的Dirichlet判别法",
-            "广义含参积分的Abel判别法",
-            "广义含参积分的可微性",
-        ],
-        "reminder": "广义含参积分优先判一致收敛，再做连续/可微/交换次序。",
-    },
-    {
-        "signals": ["二重积分", "三重积分", "换元", "变量代换", "极坐标", "柱坐标", "球坐标", "iterated integral"],
-        "targets": [
-            "一般区域上二重积分化为累次积分",
             "二重积分的变量代换公式",
             "极坐标变换公式",
             "三重积分的累次积分法",
@@ -177,28 +201,22 @@ class _MCTSNode:
     visits: int = 0
     value: float = 0.0
     action: Optional[str] = None
-    rollout_answer: str = ""
-    rollout_reasoning: str = ""
-    rollout_score: float = 0.0
 
 
 class KimiCalculusAgent:
-    """Wrapper around the Kimi:K2.5 API to solve calculus problems with multiple strategies."""
-
+    @_log_call
     def __init__(
         self,
         api_key: Optional[str] = None,
-        model: str = "deepseek-chat",
+        model: Optional[str] = None,
         base_url: Optional[str] = None,
-        timeout: int = 90,
+        timeout: Optional[int] = None,
     ) -> None:
-        self.api_key = api_key or os.getenv("KIMI_API_KEY")
-        if not self.api_key:
-            raise ValueError("Missing API key: set KIMI_API_KEY or pass api_key explicitly.")
+        self.api_key = api_key or os.getenv("DEEPSEEK_API_KEY") or os.getenv("KIMI_API_KEY") or ""
+        self.model = model or DEFAULT_MODEL
+        self.base_url = base_url or DEFAULT_BASE_URL
+        self.timeout = int(timeout or DEFAULT_TIMEOUT)
 
-        self.model = model
-        self.base_url = base_url or "https://api.deepseek.com/v1/chat/completions"
-        self.timeout = timeout
         self._few_shot_examples = self._load_examples()
         (
             self._idf_map,
@@ -210,77 +228,132 @@ class KimiCalculusAgent:
         self._kb_entries = self._load_or_build_knowledge_points()
         self._kb_name_index = self._build_kb_name_index(self._kb_entries)
 
-    def solve(self, question: str, strategy: Optional[str] = None) -> Dict[str, str]:
-        """Solve a calculus question with optional strategy routing."""
-        mode = self._resolve_strategy(question, strategy)
-        if mode in {"symbolic-limit", "limit-symbolic", "limit"}:
-            return self._solve_default(question)
+    @_log_call
+    def solve(self, item: Dict[str, Any] | str, strategy: Optional[str] = None) -> Dict[str, str]:
+        if isinstance(item, dict):
+            question_id = str(item.get("question_id", "")).strip()
+            question = str(item.get("question", "")).strip()
+            difficulty = str(item.get("difficulty", "")).strip()
+        else:
+            question_id = ""
+            question = str(item).strip()
+            difficulty = ""
+
+        if not question:
+            result = {"reasoning_process": "题目为空，无法作答。", "answer": ""}
+        else:
+            result = self.evaluate_and_solve(
+                question,
+                problem_id=question_id or None,
+                difficulty=difficulty or None,
+                strategy=strategy,
+            )
+            result = self._ensure_reasoning_detail(question, result)
+            result = self._ensure_no_unstated_assumptions(question, result)
+            result = self._ensure_proof_rigor(question, result)
+            result = self._ensure_operation_consistency(question, result)
+            result = self._ensure_answer_validity(question, result)
+            result = self._verify_solution(question, result)
+
+        return {
+            "question_id": question_id,
+            "reasoning_process": str(result.get("reasoning_process", "")).strip(),
+            "answer": str(result.get("answer", "")).strip(),
+        }
+
+    @_log_call
+    def evaluate_and_solve(
+        self,
+        question: str,
+        problem_id: Optional[str] = None,
+        difficulty: Optional[str] = None,
+        strategy: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        question = str(question).strip()
+        if not question:
+            return {"reasoning_process": "题目为空，无法作答。", "answer": ""}
+
+        if strategy:
+            mode = self._resolve_strategy(question, strategy)
+            reason = f"指定策略: {strategy}"
+        elif difficulty:
+            mode, reason = self._pick_strategy_with_metadata(question, difficulty)
+        else:
+            mode = self._resolve_strategy(question, None)
+            reason = "规则匹配"
+
+        if mode == "symbolic-limit":
+            limit_result = self._try_symbolic_limit(question)
+            if limit_result is not None:
+                return limit_result
+            mode = "pot-first"
 
         if mode in {"kb", "knowledge", "knowledge-first", "kb-default"}:
-            return self._solve_default(question)
-
-        if mode == "pot":
+            result = self._solve_default(question)
+        elif mode == "pot":
             pot_result = self._solve_with_pot(question)
-            if pot_result:
-                return pot_result
-            return self._solve_default(question)
-
-        if mode in {"step_back", "step-back", "stepback"}:
+            result = pot_result or self._solve_default(question)
+        elif mode in {"step_back", "step-back", "stepback"}:
             try:
-                return self._solve_with_step_back(question)
+                result = self._solve_with_step_back(question)
             except Exception:
                 logger.warning("Step-Back failed, falling back to default")
-                return self._solve_default(question)
-
-        if mode in {"prm", "process_reward", "process-reward"}:
+                result = self._solve_default(question)
+        elif mode in {"prm", "process_reward", "process-reward"}:
             try:
-                return self._solve_with_prm(question)
+                result = self._solve_with_prm(question)
             except Exception:
                 logger.warning("PRM simulation failed, falling back to default")
-                return self._solve_default(question)
-
-        if mode in {"constraints", "constraint", "system2", "system-2", "s2"}:
+                result = self._solve_default(question)
+        elif mode in {"constraints", "constraint", "system2", "system-2", "s2"}:
             try:
-                return self._solve_with_constraints(question)
+                result = self._solve_with_constraints(question)
             except Exception:
                 logger.warning("Constraint extraction failed, falling back to default")
-                return self._solve_default(question)
-
-        if mode in {"ltm", "least_to_most", "least-to-most"}:
-            return self._solve_with_ltm(question)
-
-        if mode == "self_consistency":
-            return self._self_consistency(question)
-
-        if mode == "mcts":
+                result = self._solve_default(question)
+        elif mode in {"ltm", "least_to_most", "least-to-most"}:
+            result = self._solve_with_ltm(question)
+        elif mode == "self_consistency":
+            result = self._self_consistency(question)
+        elif mode == "mcts":
             try:
-                return self._solve_with_mcts(question)
+                result = self._solve_with_mcts(question)
             except Exception:
                 logger.warning("MCTS failed, falling back to Tree-of-Thought")
-                return self._solve_with_tot(question)
-
-        if mode == "tot":
+                result = self._solve_with_tot(question)
+        elif mode == "tot":
             try:
-                return self._solve_with_tot(question)
+                result = self._solve_with_tot(question)
             except Exception:
                 logger.warning("ToT failed, falling back to self-consistency")
-                return self._self_consistency(question)
-
-        if mode == "debate":
+                result = self._self_consistency(question)
+        elif mode == "debate":
             try:
-                return self._solve_with_debate(question)
+                result = self._solve_with_debate(question)
             except Exception:
                 logger.warning("Debate failed, falling back to default")
-                return self._solve_default(question)
-
-        if mode in {"pot-first", "auto"}:
+                result = self._solve_default(question)
+        elif mode in {"pot-first", "auto"}:
             pot_result = self._solve_with_pot(question)
-            if pot_result:
-                return pot_result
-            return self._solve_default(question)
+            result = pot_result or self._solve_default(question)
+        else:
+            result = self._solve_default(question)
 
-        return self._solve_default(question)
+        if problem_id or difficulty:
+            prefix_parts = [
+                f"题号: {problem_id or '未提供'}",
+                f"难度: {difficulty or '未提供'}",
+                f"选择策略: {mode}",
+                f"选择依据: {reason}",
+            ]
+            prefix = " | ".join(prefix_parts) + "\n"
+            result["reasoning_process"] = prefix + result.get("reasoning_process", "")
+            result["problem_id"] = problem_id or ""
+            result["chosen_strategy"] = mode
 
+        return result
+
+    @_log_call
     def _pick_strategy_with_metadata(
         self, question: str, difficulty: Optional[str]
     ) -> Tuple[str, str]:
@@ -290,7 +363,7 @@ class KimiCalculusAgent:
         looks_multi = self._looks_multi_stage(question)
         looks_prm = self._looks_prm_needed(question)
         looks_proof = self._looks_like_proof(question)
-        looks_numeric = self._looks_like_numeric(question)
+        looks_numeric = self._looks_numeric(question)
         looks_abstract = self._looks_abstract_needed(question)
 
         score: Dict[str, int] = {
@@ -305,75 +378,43 @@ class KimiCalculusAgent:
         }
 
         if difficulty_level:
+            logger.info("[%s] if-branch@L326", "_pick_strategy_with_metadata")
             if any(tag in difficulty_level for tag in ["hard", "困难", "挑战", "竞赛", "proof"]):
+                logger.info("[%s] if-branch@L327", "_pick_strategy_with_metadata")
                 score["prm"] += 3
                 score["tot"] += 2
                 score["constraints"] += 2
-                score["step_back"] += 1
-                score["mcts"] += 2
-            elif any(tag in difficulty_level for tag in ["medium", "中等", "mid"]):
-                score["self_consistency"] += 1
-                score["pot-first"] += 1
-            else:
-                score["pot-first"] += 1
 
         if looks_constraint:
-            score["constraints"] += 4
-        if looks_prm:
-            score["prm"] += 4
+            score["constraints"] += 5
         if looks_multi:
-            score["ltm"] += 3
-            score["mcts"] += 2
+            score["ltm"] += 4
+        if looks_prm or looks_proof:
+            score["prm"] += 3
+        if looks_numeric:
+            score["pot-first"] += 4
         if looks_abstract:
             score["step_back"] += 3
-        if looks_proof:
-            score["tot"] += 2
-            score["mcts"] += 3
-        if looks_numeric:
-            score["pot-first"] += 3
-        else:
-            score["self_consistency"] += 1
 
-        priority = [
-            "constraints",
-            "prm",
-            "ltm",
-            "step_back",
-            "tot",
-            "mcts",
-            "pot-first",
-            "self_consistency",
-        ]
-        chosen = max(priority, key=lambda k: (score[k], -priority.index(k)))
+        # Fallback: ensure at least one strategy has a positive score
+        if all(v <= 0 for v in score.values()):
+            score["pot-first"] = 1
 
-        reason_parts = [
-            f"scores={score}",
-            f"difficulty={difficulty or '未提供'}",
-            f"signals: constraint={looks_constraint}, prm={looks_prm}, multi={looks_multi}, abstract={looks_abstract}, proof={looks_proof}, numeric={looks_numeric}",
-        ]
-        return chosen, " | ".join(reason_parts)
+        best = max(score, key=score.get)
+        reasons: Dict[str, str] = {
+            "constraints": "题面含明显约束条件，适合约束驱动推导",
+            "prm": "题面需要多步严格验证，适合过程奖励模型",
+            "ltm": "题面可拆分为多步子任务",
+            "step_back": "适合先抽象原理再求解",
+            "tot": "难度高，适合树状搜索全局最优路径",
+            "pot-first": "优先使用程序化计算验证",
+            "self_consistency": "适合多样化采样投票",
+            "mcts": "非常适合全局蒙特卡洛树搜索",
+        }
+        reason = reasons.get(best, "自动规则匹配")
+        return best, reason
 
-    def evaluate_and_solve(
-        self,
-        question: str,
-        problem_id: Optional[str] = None,
-        difficulty: Optional[str] = None,
-    ) -> Dict[str, Any]:
-        """Pick the best strategy given题号与难度，再解题并回填元信息。"""
-        chosen, reason = self._pick_strategy_with_metadata(question, difficulty)
-        result = self.solve(question, strategy=chosen)
-        prefix_parts = [
-            f"题号: {problem_id or '未提供'}",
-            f"难度: {difficulty or '未提供'}",
-            f"选择策略: {chosen}",
-            f"选择依据: {reason}",
-        ]
-        prefix = " | ".join(prefix_parts) + "\n"
-        result["reasoning_process"] = prefix + result.get("reasoning_process", "")
-        result["problem_id"] = problem_id or ""
-        result["chosen_strategy"] = chosen
-        return result
-
+    @_log_call
     def evaluate_batch(
         self,
         items: List[Dict[str, Any]],
@@ -408,6 +449,7 @@ class KimiCalculusAgent:
                 "correct": is_correct,
             }
             if include_metadata:
+                logger.info("[%s] if-branch@L431", "evaluate_batch")
                 record["chosen_strategy"] = solved.get("chosen_strategy", "")
             results.append(record)
 
@@ -426,96 +468,125 @@ class KimiCalculusAgent:
 
         return {"results": results, "metrics": summary}
 
+    @_log_call
     def _resolve_strategy(self, question: str, strategy: Optional[str]) -> str:
         mode = (strategy or DEFAULT_STRATEGY or "auto").lower()
         if mode != "auto":
+            logger.info("[%s] if-branch@L453", "_resolve_strategy")
             return mode
         if self._kb_lookup(question):
+            logger.info("[%s] if-branch@L455", "_resolve_strategy")
             return "kb-default"
         if self._looks_high_order_limit(question):
+            logger.info("[%s] if-branch@L457", "_resolve_strategy")
             return "pot"
         if self._looks_like_limit_question(question):
+            logger.info("[%s] if-branch@L459", "_resolve_strategy")
             return "symbolic-limit"
         if self._looks_like_proof(question) and self._looks_multi_stage(question):
+            logger.info("[%s] if-branch@L461", "_resolve_strategy")
             return "mcts"
         if self._looks_multi_stage(question):
+            logger.info("[%s] if-branch@L463", "_resolve_strategy")
             return "ltm"
         if self._looks_abstract_needed(question):
+            logger.info("[%s] if-branch@L465", "_resolve_strategy")
             return "step_back"
         if self._looks_constraint_heavy(question):
+            logger.info("[%s] if-branch@L467", "_resolve_strategy")
             return "constraints"
         if self._looks_prm_needed(question):
+            logger.info("[%s] if-branch@L469", "_resolve_strategy")
             return "prm"
         if self._looks_like_proof(question):
+            logger.info("[%s] if-branch@L471", "_resolve_strategy")
             return "tot"
         if self._looks_numeric(question):
+            logger.info("[%s] if-branch@L473", "_resolve_strategy")
             return "pot-first"
         # 默认优先尝试 PoT，再退到自洽
         return "pot-first"
 
     @staticmethod
+    @_log_call
     def _looks_like_proof(text: str) -> bool:
         lowered = text.lower()
         keywords = ["证明", "推导", "充分必要", "show that", "prove", "why", "理由", "证明题", "证明其"]
         return any(k in lowered for k in keywords)
 
     @staticmethod
+    @_log_call
     def _looks_numeric(text: str) -> bool:
         if re.search(r"[\d\+\-\*/=]", text):
+            logger.info("[%s] if-branch@L488", "_looks_numeric")
             return True
         keywords = ["计算", "求值", "极限", "积分", "导数", "曲线", "面积", "体积", "微分", "求"]
         return any(k in text for k in keywords)
 
     @staticmethod
+    @_log_call
     def _looks_like_limit_question(text: str) -> bool:
         lowered = text.lower()
         signals = ["lim", "limit", "极限", "趋于", "→", "->", "\\to"]
         return any(sig in text for sig in signals) or any(sig in lowered for sig in signals)
 
     @staticmethod
+    @_log_call
     def _looks_high_order_limit(text: str) -> bool:
         lowered = text.lower()
         limit_signals = ["lim", "limit", "极限", "→", "->", "趋于", "\to"]
         series_signals = ["泰勒", "taylor", "展开", "高阶", "级数", "展开式", "x^", "x**", "小o", "大o"]
         if any(sig in text for sig in limit_signals) or any(sig in lowered for sig in limit_signals):
+            logger.info("[%s] if-branch@L506", "_looks_high_order_limit")
             if any(sig in text for sig in series_signals) or any(sig in lowered for sig in series_signals):
+                logger.info("[%s] if-branch@L507", "_looks_high_order_limit")
                 return True
         return False
 
     @staticmethod
+    @_log_call
     def _looks_multi_stage(text: str) -> bool:
         connectors = ["然后", "之后", "接着", "最后", "并且", "同时", "分别", "再求", "再计算", "再求出", "再证明", "按顺序", "步骤"]
         if any(k in text for k in connectors):
+            logger.info("[%s] if-branch@L515", "_looks_multi_stage")
             return True
         if text.count("?") + text.count("？") >= 2:
+            logger.info("[%s] if-branch@L517", "_looks_multi_stage")
             return True
         return len(text) > 220
 
     @staticmethod
+    @_log_call
     def _looks_abstract_needed(text: str) -> bool:
         keywords = ["定理", "判别", "展开", "敛散", "级数", "波动", "惯量", "渐近", "逼近", "泰勒", "taylor", "convergen", "theorem"]
         lowered = text.lower()
         return any(k in text for k in keywords) or any(k in lowered for k in keywords)
 
     @staticmethod
+    @_log_call
     def _looks_constraint_heavy(text: str) -> bool:
         if len(text) < 140:
+            logger.info("[%s] if-branch@L531", "_looks_constraint_heavy")
             return False
         keywords = ["约束", "限制", "边界", "条件", "区间", "上界", "下界", "必须", "满足", "约束条件", "boundary", "constraint", "inequality", "范围"]
         lowered = text.lower()
         return any(k in text for k in keywords) or any(k in lowered for k in keywords)
 
     @staticmethod
+    @_log_call
     def _looks_prm_needed(text: str) -> bool:
         if len(text) < 180:
+            logger.info("[%s] if-branch@L540", "_looks_prm_needed")
             return False
         keywords = ["证明", "推导", "步骤", "变形", "严谨", "长", "长证明", "step"]
         lowered = text.lower()
         return any(k in text for k in keywords) or any(k in lowered for k in keywords)
 
+    @_log_call
     def _solve_default(self, question: str) -> Dict[str, str]:
         expr = self._extract_math_expression(question)
         if expr:
+            logger.info("[%s] if-branch@L549", "_solve_default")
             try:
                 value = self._safe_eval(expr)
                 return {
@@ -523,11 +594,14 @@ class KimiCalculusAgent:
                     "answer": str(value),
                 }
             except Exception:
+                logger.warning("[%s] except-branch@L556", "_solve_default", exc_info=True)
                 pass
 
-        limit_result = self._try_symbolic_limit(question)
-        if limit_result is not None:
-            return limit_result
+        if not re.search(r"证明|prove", question, re.IGNORECASE):
+            limit_result = self._try_symbolic_limit(question)
+            if limit_result is not None:
+                logger.info("[%s] if-branch@L560", "_solve_default")
+                return limit_result
 
         # 可选：跳过 KB 直接走模型，避免题型误匹配导致的无答案
 
@@ -535,30 +609,40 @@ class KimiCalculusAgent:
         response_text = self._chat_completion(messages)
         result = self._ensure_schema(response_text)
         if FAST_MODE:
+            logger.info("[%s] if-branch@L568", "_solve_default")
             return result
         refined = self._refine_answer(question, result)
-        return refined
+        return self._ensure_reasoning_detail(question, refined)
 
+    @_log_call
     def _build_messages(self, question: str) -> List[Dict[str, str]]:
         few_shot_context = self._build_few_shot_context(question)
         kb_context = self._build_kb_context(question)
         messages: List[Dict[str, str]] = [{"role": "system", "content": SYSTEM_PROMPT}]
         if few_shot_context:
+            logger.info("[%s] if-branch@L578", "_build_messages")
             messages.append({"role": "system", "content": few_shot_context})
         if kb_context:
+            logger.info("[%s] if-branch@L580", "_build_messages")
             messages.append({"role": "system", "content": kb_context})
         messages.append({"role": "user", "content": self._format_question(question)})
         return messages
 
     @staticmethod
+    @_log_call
     def _format_question(question: str) -> str:
         return (
             "请严格输出 JSON，对象包含 reasoning_process 与 answer 两个字符串字段。"
+            "reasoning_process 必须包含分步骤推导（至少 3 步），不得只给评价或一句话。"
+            "不得引入题目未给出的条件（如单调、凸性、有界等）。"
+            "若为计算题，请加入简短数值/量级自检。"
             "不要添加 Markdown 代码块或额外文本，只输出 JSON。题目如下：\n" + question.strip()
         )
 
+    @_log_call
     def _build_few_shot_context(self, question: str) -> str:
         if not self._few_shot_examples:
+            logger.info("[%s] if-branch@L595", "_build_few_shot_context")
             return ""
 
         scored = [
@@ -569,6 +653,7 @@ class KimiCalculusAgent:
         scored.sort(key=lambda x: x[0], reverse=True)
         top_examples = [ex for _, ex in scored[:FEWSHOT_TOP_K]]
         if not top_examples:
+            logger.info("[%s] if-branch@L605", "_build_few_shot_context")
             return ""
 
         chunks: List[str] = ["以下是相似题的示例，请学习表达与格式，但不要照搬答案，仅用于风格参考。"]
@@ -583,6 +668,7 @@ class KimiCalculusAgent:
 
         return "\n".join(chunks)
 
+    @_log_call
     def _example_score(self, question: str, example: Dict[str, Any], index: int) -> float:
         q_text = example.get("content", {}).get("question_text", "")
         primary = example.get("classification", {}).get("primary_type", "").lower()
@@ -594,22 +680,28 @@ class KimiCalculusAgent:
         char_overlap = len(set(self._char_ngrams(question, 2)) & set(self._char_ngrams(q_text, 2)))
         score = base_score + tfidf_score * 5.0 + bm25_score * 1.6 + char_overlap * 0.2
         if primary and primary in question_lower:
+            logger.info("[%s] if-branch@L631", "_example_score")
             score *= 1.2
         if secondary and secondary in question_lower:
+            logger.info("[%s] if-branch@L633", "_example_score")
             score *= 1.1
         return score
 
+    @_log_call
     def _load_examples(self) -> List[Dict[str, Any]]:
         try:
             data_path = Path(__file__).resolve().parent.parent / "data" / "train.json"
             if not data_path.exists():
+                logger.info("[%s] if-branch@L641", "_load_examples")
                 return []
             with data_path.open("r", encoding="utf-8") as f:
                 data = json.load(f)
             return data.get("questions", [])
         except Exception:
+            logger.warning("[%s] except-branch@L646", "_load_examples", exc_info=True)
             return []
 
+    @_log_call
     def _load_or_build_knowledge_points(self) -> List[Dict[str, Any]]:
         data_dir = Path(__file__).resolve().parent.parent / "data"
         theory_path = data_dir / THEORY_FILE_NAME
@@ -618,12 +710,15 @@ class KimiCalculusAgent:
         source_mtime = source_path.stat().st_mtime if source_path.exists() else 0.0
 
         if kb_path.exists():
+            logger.info("[%s] if-branch@L657", "_load_or_build_knowledge_points")
             try:
                 with kb_path.open("r", encoding="utf-8") as f:
                     payload = json.load(f)
                 if isinstance(payload, list):
+                    logger.info("[%s] if-branch@L661", "_load_or_build_knowledge_points")
                     points = payload
                 else:
+                    logger.info("[%s] else-branch@L663", "_load_or_build_knowledge_points")
                     points = payload.get("points", [])
                 meta = payload.get("meta", {}) if isinstance(payload, dict) else {}
                 if (
@@ -637,6 +732,7 @@ class KimiCalculusAgent:
                 logger.warning("Failed to load cached knowledge points, will rebuild.")
 
         if source_path.name == THEORY_FILE_NAME:
+            logger.info("[%s] if-branch@L676", "_load_or_build_knowledge_points")
             try:
                 with source_path.open("r", encoding="utf-8") as f:
                     theory_payload = json.load(f)
@@ -665,6 +761,7 @@ class KimiCalculusAgent:
             classification = ex.get("classification", {})
             kps = classification.get("knowledge_points") or []
             if not isinstance(kps, list):
+                logger.info("[%s] if-branch@L704", "_load_or_build_knowledge_points")
                 continue
 
             content = ex.get("content", {})
@@ -676,16 +773,20 @@ class KimiCalculusAgent:
             formula_pool = []
             latex_question = str(content.get("latex_question", "")).strip()
             if latex_question:
+                logger.info("[%s] if-branch@L715", "_load_or_build_knowledge_points")
                 formula_pool.append(latex_question)
             latex_answer = str(solution.get("latex_answer", "")).strip()
             if latex_answer:
+                logger.info("[%s] if-branch@L718", "_load_or_build_knowledge_points")
                 formula_pool.append(latex_answer)
             final_answer = str(solution.get("final_answer", "")).strip()
             if final_answer:
+                logger.info("[%s] if-branch@L721", "_load_or_build_knowledge_points")
                 formula_pool.append(final_answer)
 
             steps = solution.get("step_by_step") or []
             if isinstance(steps, list):
+                logger.info("[%s] if-branch@L725", "_load_or_build_knowledge_points")
                 for step in steps:
                     formula_pool.extend(self._extract_formula_snippets(str(step)))
 
@@ -695,6 +796,7 @@ class KimiCalculusAgent:
             for kp_raw in kps:
                 kp = str(kp_raw).strip()
                 if not kp:
+                    logger.info("[%s] if-branch@L734", "_load_or_build_knowledge_points")
                     continue
                 key = self._normalize_lookup_text(kp)
                 entry = points_map.setdefault(
@@ -711,24 +813,30 @@ class KimiCalculusAgent:
                 )
 
                 if primary and primary not in entry["related_types"]:
+                    logger.info("[%s] if-branch@L750", "_load_or_build_knowledge_points")
                     entry["related_types"].append(primary)
                 if secondary and secondary not in entry["related_types"]:
+                    logger.info("[%s] if-branch@L752", "_load_or_build_knowledge_points")
                     entry["related_types"].append(secondary)
 
                 if question_text and len(entry["examples"]) < 4 and question_text not in entry["examples"]:
+                    logger.info("[%s] if-branch@L755", "_load_or_build_knowledge_points")
                     entry["examples"].append(question_text)
 
                 for formula in formula_pool:
                     candidate = formula.strip()
                     if candidate and candidate not in entry["formulas"]:
+                        logger.info("[%s] if-branch@L760", "_load_or_build_knowledge_points")
                         entry["formulas"].append(candidate)
 
                 if reasoning and reasoning not in entry["principles"] and len(entry["principles"]) < 3:
+                    logger.info("[%s] if-branch@L763", "_load_or_build_knowledge_points")
                     entry["principles"].append(self._truncate(reasoning, 240))
 
                 for kw in [primary, secondary]:
                     kw = kw.strip()
                     if kw and kw not in entry["keywords"]:
+                        logger.info("[%s] if-branch@L768", "_load_or_build_knowledge_points")
                         entry["keywords"].append(kw)
 
         points = sorted(points_map.values(), key=lambda x: x.get("name", ""))
@@ -751,29 +859,35 @@ class KimiCalculusAgent:
 
         return points
 
+    @_log_call
     def _build_knowledge_points_from_theory(self, payload: Dict[str, Any]) -> List[Dict[str, Any]]:
         points_map: Dict[str, Dict[str, Any]] = {}
         knowledge_base = payload.get("knowledge_base", [])
         if not isinstance(knowledge_base, list):
+            logger.info("[%s] if-branch@L795", "_build_knowledge_points_from_theory")
             return []
 
         for section_entry in knowledge_base:
             if not isinstance(section_entry, dict):
+                logger.info("[%s] if-branch@L799", "_build_knowledge_points_from_theory")
                 continue
 
             section = str(section_entry.get("section", "")).strip()
             topics = section_entry.get("topics", [])
             if not isinstance(topics, list):
+                logger.info("[%s] if-branch@L804", "_build_knowledge_points_from_theory")
                 continue
 
             for topic in topics:
                 if not isinstance(topic, dict):
+                    logger.info("[%s] if-branch@L808", "_build_knowledge_points_from_theory")
                     continue
 
                 name = str(topic.get("name", "")).strip()
                 content = str(topic.get("content", "")).strip()
                 proof = str(topic.get("proof", "")).strip()
                 if not name:
+                    logger.info("[%s] if-branch@L814", "_build_knowledge_points_from_theory")
                     continue
 
                 key = self._normalize_lookup_text(f"{section} {name}")
@@ -792,29 +906,37 @@ class KimiCalculusAgent:
                 )
 
                 if section and section not in entry["related_types"]:
+                    logger.info("[%s] if-branch@L832", "_build_knowledge_points_from_theory")
                     entry["related_types"].append(section)
                 if section and section not in entry["aliases"]:
+                    logger.info("[%s] if-branch@L834", "_build_knowledge_points_from_theory")
                     entry["aliases"].append(section)
 
                 for text in (name, content, proof, section):
                     for formula in self._extract_formula_snippets(text):
                         if formula not in entry["formulas"]:
+                            logger.info("[%s] if-branch@L839", "_build_knowledge_points_from_theory")
                             entry["formulas"].append(formula)
 
                 if content and content not in entry["principles"] and len(entry["principles"]) < 3:
+                    logger.info("[%s] if-branch@L842", "_build_knowledge_points_from_theory")
                     entry["principles"].append(self._truncate(content, 260))
                 if proof and proof not in entry["principles"] and len(entry["principles"]) < 5:
+                    logger.info("[%s] if-branch@L844", "_build_knowledge_points_from_theory")
                     entry["principles"].append(self._truncate(proof, 260))
 
                 for keyword in self._extract_theory_keywords(section, name, content, proof):
                     if keyword not in entry["keywords"]:
+                        logger.info("[%s] if-branch@L848", "_build_knowledge_points_from_theory")
                         entry["keywords"].append(keyword)
 
         return sorted(points_map.values(), key=lambda x: x.get("name", ""))
 
     @staticmethod
+    @_log_call
     def _extract_formula_snippets(text: str) -> List[str]:
         if not text:
+            logger.info("[%s] if-branch@L856", "_extract_formula_snippets")
             return []
         cleaned = re.sub(r"\[cite:\s*\d+\]", "", text)
         patterns = [
@@ -829,10 +951,12 @@ class KimiCalculusAgent:
             for match in re.findall(pattern, cleaned, flags=re.IGNORECASE):
                 candidate = str(match).strip()
                 if candidate:
+                    logger.info("[%s] if-branch@L870", "_extract_formula_snippets")
                     seen[candidate] = None
         return list(seen.keys())
 
     @staticmethod
+    @_log_call
     def _extract_theory_keywords(*texts: str) -> List[str]:
         keywords: List[str] = []
         patterns = [
@@ -844,24 +968,29 @@ class KimiCalculusAgent:
             for match in re.findall(pattern, merged, flags=re.IGNORECASE):
                 candidate = str(match).strip()
                 if candidate and candidate not in keywords:
+                    logger.info("[%s] if-branch@L886", "_extract_theory_keywords")
                     keywords.append(candidate)
 
         return keywords
 
     @staticmethod
+    @_log_call
     def _build_kb_name_index(entries: List[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
         index: Dict[str, Dict[str, Any]] = {}
         for entry in entries:
             name = str(entry.get("name", "")).strip()
             if name:
+                logger.info("[%s] if-branch@L897", "_build_kb_name_index")
                 index[KimiCalculusAgent._normalize_lookup_text(name)] = entry
             for alias in entry.get("aliases") or []:
                 alias_text = str(alias).strip()
                 if alias_text:
+                    logger.info("[%s] if-branch@L901", "_build_kb_name_index")
                     index[KimiCalculusAgent._normalize_lookup_text(alias_text)] = entry
         return index
 
     @staticmethod
+    @_log_call
     def _entry_to_kb_hit(entry: Dict[str, Any], score: float) -> Dict[str, Any]:
         return {
             "score": float(score),
@@ -872,14 +1001,17 @@ class KimiCalculusAgent:
         }
 
     @staticmethod
+    @_log_call
     def _merge_kb_hits(hits: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         merged: Dict[str, Dict[str, Any]] = {}
         for hit in hits:
             name = str(hit.get("name", "")).strip()
             if not name:
+                logger.info("[%s] if-branch@L922", "_merge_kb_hits")
                 continue
             current = merged.get(name)
             if current is None:
+                logger.info("[%s] if-branch@L925", "_merge_kb_hits")
                 merged[name] = {
                     "score": float(hit.get("score", 0.0)),
                     "name": name,
@@ -894,16 +1026,19 @@ class KimiCalculusAgent:
                 existing = current.get(key) or []
                 for item in hit.get(key) or []:
                     if item not in existing:
+                        logger.info("[%s] if-branch@L939", "_merge_kb_hits")
                         existing.append(item)
                 current[key] = existing
 
         ordered = sorted(merged.values(), key=lambda x: float(x.get("score", 0.0)), reverse=True)
         return ordered
 
+    @_log_call
     def _build_tfidf_index(
         self, examples: List[Dict[str, Any]]
     ) -> Tuple[Dict[str, float], List[Dict[str, float]], List[List[str]], List[int], float]:
         if not examples:
+            logger.info("[%s] if-branch@L950", "_build_tfidf_index")
             return {}, [], [], [], 0.0
 
         df: Counter[str] = Counter()
@@ -923,6 +1058,7 @@ class KimiCalculusAgent:
         vectors: List[Dict[str, float]] = []
         for tokens in doc_tokens:
             if not tokens:
+                logger.info("[%s] if-branch@L969", "_build_tfidf_index")
                 vectors.append({})
                 continue
             tf = Counter(tokens)
@@ -933,36 +1069,46 @@ class KimiCalculusAgent:
         return idf_map, vectors, doc_tokens, doc_lengths, avg_len
 
     @staticmethod
+    @_log_call
     def _truncate(text: str, limit: int) -> str:
         if len(text) <= limit:
+            logger.info("[%s] if-branch@L982", "_truncate")
             return text
         return text[:limit].rstrip() + "..."
 
     @staticmethod
+    @_log_call
     def _tokenize(text: str) -> List[str]:
         normalized = re.sub(r"[^\w]+", " ", text.lower())
         return [t for t in normalized.split() if t]
 
     @staticmethod
+    @_log_call
     def _normalize_lookup_text(text: str) -> str:
         return re.sub(r"\s+", "", text).strip().lower()
 
+    @_log_call
     def _build_query_tfidf(self, text: str) -> Dict[str, float]:
         tokens = self._tokenize(text)
         if not tokens or not self._idf_map:
+            logger.info("[%s] if-branch@L1000", "_build_query_tfidf")
             return {}
         tf = Counter(tokens)
         length = len(tokens)
         return {token: (tf[token] / length) * self._idf_map.get(token, 0.0) for token in tf}
 
+    @_log_call
     def _bm25_similarity(self, text: str, doc_index: int, k1: float = 1.5, b: float = 0.75) -> float:
         if not self._idf_map or doc_index >= len(self._doc_tokens):
+            logger.info("[%s] if-branch@L1008", "_bm25_similarity")
             return 0.0
         query_tokens = self._tokenize(text)
         if not query_tokens:
+            logger.info("[%s] if-branch@L1011", "_bm25_similarity")
             return 0.0
         doc_tokens = self._doc_tokens[doc_index]
         if not doc_tokens:
+            logger.info("[%s] if-branch@L1014", "_bm25_similarity")
             return 0.0
         doc_tf = Counter(doc_tokens)
         doc_len = self._doc_lengths[doc_index] if self._doc_lengths else len(doc_tokens)
@@ -972,89 +1118,177 @@ class KimiCalculusAgent:
             idf = self._idf_map.get(token, 0.0)
             tf = doc_tf.get(token, 0)
             if tf == 0:
+                logger.info("[%s] if-branch@L1023", "_bm25_similarity")
                 continue
             numer = tf * (k1 + 1)
             denom = tf + k1 * (1 - b + b * doc_len / avg_len)
             score += idf * numer / denom
         return score
 
+    @_log_call
     def _tfidf_similarity(self, text: str, doc_index: int) -> float:
         if not self._idf_map or doc_index >= len(self._tfidf_vectors):
+            logger.info("[%s] if-branch@L1032", "_tfidf_similarity")
             return 0.0
         query_vec = self._build_query_tfidf(text)
         doc_vec = self._tfidf_vectors[doc_index]
         if not query_vec or not doc_vec:
+            logger.info("[%s] if-branch@L1036", "_tfidf_similarity")
             return 0.0
         return sum(weight * doc_vec.get(token, 0.0) for token, weight in query_vec.items())
 
+    @_log_call
     def _similarity_score(self, a: str, b: str) -> int:
         tokens_a = set(self._tokenize(a))
         tokens_b = set(self._tokenize(b))
         if not tokens_a or not tokens_b:
+            logger.info("[%s] if-branch@L1044", "_similarity_score")
             return 0
         return len(tokens_a & tokens_b)
 
     @staticmethod
+    @_log_call
     def _char_ngrams(text: str, n: int = 2) -> List[str]:
         clean = re.sub(r"\s+", "", text)
         return [clean[i : i + n] for i in range(max(len(clean) - n + 1, 0))]
 
+    @_log_call
     def _ensure_schema(self, raw_text: str) -> Dict[str, str]:
         parsed = self._extract_json(raw_text)
         if parsed is None and SECOND_PASS_SCHEMA_FIX:
+            logger.info("[%s] if-branch@L1057", "_ensure_schema")
             parsed = self._schema_fix(raw_text)
         if parsed is None:
-            return {"reasoning_process": raw_text.strip(), "answer": raw_text.strip()}
+            logger.info("[%s] if-branch@L1059", "_ensure_schema")
+            return {"reasoning_process": raw_text.strip(), "answer": ""}
 
         reasoning = str(parsed.get("reasoning_process", "")).strip()
         answer = str(parsed.get("answer", "")).strip()
 
         if not reasoning:
+            logger.info("[%s] if-branch@L1065", "_ensure_schema")
             reasoning = raw_text.strip()
-        if not answer:
-            answer = raw_text.strip()
 
         return {"reasoning_process": reasoning, "answer": answer}
 
+    @staticmethod
+    @_log_call
+    def _should_skip_symbolic_limit(question: str, expr_text: str) -> bool:
+        combined = f"{question} {expr_text}"
+        if re.search(r"[∑Σ∫∏]", combined):
+            return True
+        if re.search(r"\b(sum|sigma|prod|product|series|integral|int)\b", combined, re.IGNORECASE):
+            return True
+        if re.search(r"级数|收敛域|无穷级数", question):
+            return True
+        func_matches = re.findall(r"([a-zA-Z][a-zA-Z0-9_]*)\s*\(", expr_text)
+        if func_matches:
+            allowed = {"sin", "cos", "tan", "log", "ln", "exp", "sqrt"}
+            for name in func_matches:
+                if name not in allowed:
+                    return True
+        return False
+
+    @_log_call
     def _try_symbolic_limit(self, question: str) -> Optional[Dict[str, str]]:
         if not sp:
+            logger.info("[%s] if-branch@L1074", "_try_symbolic_limit")
+            return None
+        if re.search(r"证明|prove", question, re.IGNORECASE):
+            logger.info("[%s] if-branch@L1076", "_try_symbolic_limit")
             return None
 
+        normalized = question.replace("\\to", "->").replace("\u2192", "->")
         match = re.search(
-            r"(?:\\lim|lim)\s*(?:_\{(?P<var1>[a-zA-Z])\s*\\to\s*(?P<point1>[^}]*)\}|_\((?P<var2>[a-zA-Z])\s*\\to\s*(?P<point2>[^)]*)\)|_(?P<var3>[a-zA-Z])\s*\\to\s*(?P<point3>[^\s]+))?",
-            question,
+            r"(?:\\lim|lim)\s*(?:_\{(?P<var1>[a-zA-Z])\s*->\s*(?P<point1>[^}]*)\}"
+            r"|_\((?P<var2>[a-zA-Z])\s*->\s*(?P<point2>[^)]*)\)"
+            r"|_(?P<var3>[a-zA-Z])\s*->\s*(?P<point3>[^\s]+)"
+            r"|(?P<var4>[a-zA-Z])\s*->\s*(?P<point4>[^\s]+))?",
+            normalized,
             re.IGNORECASE,
         )
         if not match:
+            logger.info("[%s] if-branch@L1082", "_try_symbolic_limit")
             return None
 
-        var_name = next((match.group(name) for name in ("var1", "var2", "var3") if match.group(name)), "x")
-        point_text = next((match.group(name) for name in ("point1", "point2", "point3") if match.group(name)), "0")
-        tail = question[match.end():].strip()
+        var_name = next(
+            (match.group(name) for name in ("var1", "var2", "var3", "var4") if match.group(name)),
+            "x",
+        )
+        point_text = next(
+            (match.group(name) for name in ("point1", "point2", "point3", "point4") if match.group(name)),
+            "0",
+        )
+        point_text = re.sub(r"\^\s*[-+]", "", point_text)
+        point_text = re.sub(r"[-+]\s*$", "", point_text)
+        tail = normalized[match.end():].strip()
         if not tail:
+            logger.info("[%s] if-branch@L1088", "_try_symbolic_limit")
             return None
 
         tail = tail.lstrip("：:，, ")
         expr_text = self._strip_leading_delimiters(tail)
+        expr_text = re.sub(r"^_\s*(\{[^}]*\}|\([^)]*\)|[^\s]+)\s*", "", expr_text)
+        expr_text = re.split(r"[，,。;；]|\b其中\b|\bwhere\b|=|\?|？", expr_text, maxsplit=1)[0].strip()
+        if re.search(r"\.{2,}|…|⋯|\\cdots", expr_text):
+            logger.info("[%s] if-branch@L1094", "_try_symbolic_limit")
+            return None
+        if self._should_skip_symbolic_limit(question, expr_text):
+            logger.info("[%s] if-branch@L1094", "_try_symbolic_limit")
+            return None
         expr_text = self._tex_to_sympy_expr(expr_text)
         if not expr_text:
+            logger.info("[%s] if-branch@L1094", "_try_symbolic_limit")
             return None
 
         try:
             symbol = sp.Symbol(var_name)
-            locals_map = {"E": sp.E, "e": sp.E, "pi": sp.pi, var_name: symbol, "x": sp.Symbol("x")}
-            point = sp.sympify(self._tex_to_sympy_expr(point_text), locals=locals_map)
-            expr = sp.sympify(expr_text, locals=locals_map)
+            locals_map = {
+                "E": sp.E,
+                "e": sp.E,
+                "pi": sp.pi,
+                "oo": sp.oo,
+                "ln": sp.log,
+                "sin": sp.sin,
+                "cos": sp.cos,
+                "tan": sp.tan,
+                "log": sp.log,
+                "exp": sp.exp,
+                "sqrt": sp.sqrt,
+                var_name: symbol,
+                "x": sp.Symbol("x"),
+            }
+            point_expr = self._tex_to_sympy_expr(point_text)
+            if parse_expr:
+                transformations = standard_transformations + (implicit_multiplication_application,)
+                point = parse_expr(point_expr, local_dict=locals_map, transformations=transformations)
+                expr = parse_expr(expr_text, local_dict=locals_map, transformations=transformations)
+            else:
+                point = sp.sympify(point_expr, locals=locals_map)
+                expr = sp.sympify(expr_text, locals=locals_map)
+            if not isinstance(expr, sp.Basic) or not isinstance(point, sp.Basic):
+                logger.info("[%s] if-branch@L1101", "_try_symbolic_limit")
+                return None
+            if isinstance(expr, (list, tuple)):
+                logger.info("[%s] if-branch@L1102", "_try_symbolic_limit")
+                return None
+            if expr.has(sp.Sum, sp.Integral, sp.Product):
+                logger.info("[%s] if-branch@L1103", "_try_symbolic_limit")
+                return None
             value = sp.limit(expr, symbol, point)
         except Exception:
+            logger.warning("[%s] except-branch@L1103", "_try_symbolic_limit", exc_info=True)
             return None
 
         if value is None:
+            logger.info("[%s] if-branch@L1106", "_try_symbolic_limit")
             return None
 
         if getattr(value, "is_number", False):
+            logger.info("[%s] if-branch@L1109", "_try_symbolic_limit")
             answer = str(sp.simplify(value))
         else:
+            logger.info("[%s] else-branch@L1111", "_try_symbolic_limit")
             answer = str(value)
 
         reasoning = (
@@ -1064,15 +1298,34 @@ class KimiCalculusAgent:
         return {"reasoning_process": reasoning, "answer": answer}
 
     @staticmethod
+    @_log_call
     def _strip_leading_delimiters(text: str) -> str:
         stripped = text.strip()
-        while stripped and stripped[0] in "([{":
-            stripped = stripped[1:].strip()
+        pairs = {"(": ")", "[": "]", "{": "}"}
+        while stripped and stripped[0] in pairs:
+            left = stripped[0]
+            right = pairs[left]
+            depth = 0
+            match_index = -1
+            for idx, ch in enumerate(stripped):
+                if ch == left:
+                    depth += 1
+                elif ch == right:
+                    depth -= 1
+                    if depth == 0:
+                        match_index = idx
+                        break
+            if match_index == len(stripped) - 1:
+                stripped = stripped[1:-1].strip()
+                continue
+            break
         return stripped
 
+    @_log_call
     def _tex_to_sympy_expr(self, text: str) -> str:
         expr = text.strip()
         if not expr:
+            logger.info("[%s] if-branch@L1131", "_tex_to_sympy_expr")
             return expr
 
         expr = expr.replace("\\left", "").replace("\\right", "")
@@ -1089,6 +1342,7 @@ class KimiCalculusAgent:
         expr = expr.replace("\\", "")
         return expr
 
+    @_log_call
     def _replace_tex_fractions(self, text: str) -> str:
         result = text
         while "\\frac" in result:
@@ -1097,37 +1351,141 @@ class KimiCalculusAgent:
             remainder = result[start + 5 :]
             numerator, after_numerator = self._extract_braced_group(remainder)
             if numerator is None:
+                logger.info("[%s] if-branch@L1156", "_replace_tex_fractions")
                 break
             denominator, after_denominator = self._extract_braced_group(after_numerator)
             if denominator is None:
+                logger.info("[%s] if-branch@L1159", "_replace_tex_fractions")
                 break
             replacement = f"(({self._tex_to_sympy_expr(numerator)})/({self._tex_to_sympy_expr(denominator)}))"
             result = prefix + replacement + after_denominator
         return result
 
     @staticmethod
+    @_log_call
     def _extract_braced_group(text: str) -> Tuple[Optional[str], str]:
         stripped = text.lstrip()
         offset = len(text) - len(stripped)
         if not stripped.startswith("{"):
+            logger.info("[%s] if-branch@L1170", "_extract_braced_group")
             return None, text
 
         depth = 0
         start_idx = -1
         for idx, char in enumerate(stripped):
             if char == "{":
+                logger.info("[%s] if-branch@L1176", "_extract_braced_group")
                 depth += 1
                 if depth == 1:
+                    logger.info("[%s] if-branch@L1178", "_extract_braced_group")
                     start_idx = idx + 1
             elif char == "}":
+                logger.info("[%s] if-branch@L1180", "_extract_braced_group")
                 depth -= 1
                 if depth == 0 and start_idx >= 0:
+                    logger.info("[%s] if-branch@L1182", "_extract_braced_group")
                     content = stripped[start_idx:idx]
                     remainder = stripped[idx + 1 :]
                     return content, remainder
 
         return None, text
 
+    @staticmethod
+    def _repair_truncated_json(raw: str) -> Optional[str]:
+        """Repair JSON truncated by max_tokens: close strings, braces, brackets.
+
+        Walks character-by-character to track string/escape state, then
+        appends closing quotes/braces/brackets as needed.
+        """
+        if not raw:
+            return None
+        s = raw.strip()
+        if not s.startswith("{"):
+            return None
+
+        # Track brace/bracket depth and string state
+        brace_depth = 0
+        bracket_depth = 0
+        in_string = False
+        escape_next = False
+        for ch in s:
+            if escape_next:
+                escape_next = False
+                continue
+            if ch == "\\":
+                escape_next = True
+                continue
+            if ch == '"':
+                in_string = not in_string
+                continue
+            if in_string:
+                continue
+            if ch == "{":
+                brace_depth += 1
+            elif ch == "}":
+                brace_depth -= 1
+            elif ch == "[":
+                bracket_depth += 1
+            elif ch == "]":
+                bracket_depth -= 1
+
+        # Close unterminated string
+        if in_string:
+            s = s + '"'
+
+        # Close unclosed braces & brackets
+        s = s + "}" * max(brace_depth, 0)
+        s = s + "]" * max(bracket_depth, 0)
+
+        try:
+            json.loads(s)
+            return s
+        except json.JSONDecodeError:
+            pass
+
+        # Fallback: truncate the last broken key-value pair and retry
+        last_comma = -1
+        for m in re.finditer(r',\s*"', s):
+            last_comma = m.start()
+        if last_comma > 0:
+            truncated = s[:last_comma].rstrip().rstrip(",")
+            # Re-count depths on truncated version
+            bd = 0
+            brd = 0
+            in_s = False
+            esc = False
+            for ch in truncated:
+                if esc:
+                    esc = False
+                    continue
+                if ch == "\\":
+                    esc = True
+                    continue
+                if ch == '"':
+                    in_s = not in_s
+                    continue
+                if in_s:
+                    continue
+                if ch == "{":
+                    bd += 1
+                elif ch == "}":
+                    bd -= 1
+                elif ch == "[":
+                    brd += 1
+                elif ch == "]":
+                    brd -= 1
+            if in_s:
+                truncated = truncated + '"'
+            truncated = truncated + "}" * max(bd, 0) + "]" * max(brd, 0)
+            try:
+                json.loads(truncated)
+                return truncated
+            except json.JSONDecodeError:
+                pass
+
+        return None
+
+    @_log_call
     def _extract_json(self, raw_text: str) -> Optional[Dict[str, Any]]:
         text = raw_text.strip()
         text = self._strip_code_fences(text)
@@ -1136,15 +1494,58 @@ class KimiCalculusAgent:
         except json.JSONDecodeError:
             pass
 
-        match = re.search(r"\{.*\}", text, re.DOTALL)
-        if not match:
+        # --- stack-based extraction: find outermost balanced { … } ---
+        start = text.find("{")
+        if start == -1:
             return None
+
+        depth = 0
+        end = -1
+        in_string = False
+        escape_next = False
+        for i in range(start, len(text)):
+            ch = text[i]
+            if escape_next:
+                escape_next = False
+                continue
+            if ch == "\\":
+                escape_next = True
+                continue
+            if ch == '"':
+                in_string = not in_string
+                continue
+            if in_string:
+                continue
+            if ch == "{":
+                depth += 1
+            elif ch == "}":
+                depth -= 1
+                if depth == 0:
+                    end = i
+                    break
+
+        if end == -1:
+            # No closing brace → truncated
+            candidate = text[start:]
+        else:
+            candidate = text[start : end + 1]
 
         try:
-            return json.loads(match.group(0))
+            return json.loads(candidate)
         except json.JSONDecodeError:
-            return None
+            pass
 
+        # --- attempt auto-repair ---
+        repaired = self._repair_truncated_json(candidate)
+        if repaired is not None:
+            try:
+                return json.loads(repaired)
+            except json.JSONDecodeError:
+                pass
+
+        return None
+
+    @_log_call
     def _schema_fix(self, raw_text: str) -> Optional[Dict[str, Any]]:
         messages = [
             {"role": "system", "content": "你是输出修复器，只返回 JSON 对象，包含 reasoning_process 与 answer 两个字符串字段，不要添加任何其他文本或代码块。"},
@@ -1154,29 +1555,381 @@ class KimiCalculusAgent:
         try:
             return json.loads(self._strip_code_fences(fixed))
         except Exception:
+            logger.warning("[%s] except-branch@L1216", "_schema_fix", exc_info=True)
             return None
 
+    @_log_call
     def _refine_answer(self, question: str, draft: Dict[str, str]) -> Dict[str, str]:
         if not draft:
+            logger.info("[%s] if-branch@L1221", "_refine_answer")
             return draft
         messages = [
-            {"role": "system", "content": "你是答案校对器，请严格输出 JSON，字段 reasoning_process 与 answer，保持中文，简洁严谨，不要添加代码块。"},
+            {
+                "role": "system",
+                "content": (
+                    "你是答案校对器，请严格输出 JSON，字段 reasoning_process 与 answer。"
+                    "reasoning_process 必须保留完整推导步骤（至少 3 步），不要缩写或省略。"
+                    "严禁只给评价或一句话结论，不要添加代码块。"
+                ),
+            },
             {
                 "role": "user",
                 "content": "题目：" + question.strip() + "\n" + "初稿：" + json.dumps(draft, ensure_ascii=False),
             },
         ]
-        text = self._chat_completion(messages, max_tokens=720)
+        text = self._chat_completion(messages, max_tokens=1600)
         parsed = self._extract_json(text)
         if parsed is None:
+            logger.info("[%s] if-branch@L1232", "_refine_answer")
             return draft
         reasoning = str(parsed.get("reasoning_process", "")).strip() or draft.get("reasoning_process", "")
         answer = str(parsed.get("answer", "")).strip() or draft.get("answer", "")
+        if self._needs_reasoning_expansion(reasoning):
+            return {"reasoning_process": draft.get("reasoning_process", reasoning), "answer": answer}
         return {"reasoning_process": reasoning, "answer": answer}
 
+    @staticmethod
+    @_log_call
+    def _needs_reasoning_expansion(reasoning: str) -> bool:
+        cleaned = (reasoning or "").strip()
+        if not cleaned:
+            return True
+        if len(cleaned) < 80:
+            return True
+        eval_phrases = [
+            "初稿",
+            "答案无误",
+            "结果准确",
+            "步骤完整",
+            "正确",
+            "无误",
+            "略",
+            "省略",
+        ]
+        if any(phrase in cleaned for phrase in eval_phrases):
+            return True
+        return False
+
+    @_log_call
+    def _ensure_reasoning_detail(self, question: str, result: Dict[str, str]) -> Dict[str, str]:
+        reasoning = str(result.get("reasoning_process", "")).strip()
+        if not self._needs_reasoning_expansion(reasoning):
+            return result
+        answer = str(result.get("answer", "")).strip()
+        messages = [
+            {
+                "role": "system",
+                "content": (
+                    "你是解题过程补全器，只输出 JSON，对象包含 reasoning_process 与 answer 两个字符串字段。"
+                    "reasoning_process 必须分步骤（至少 3 步），写清关键公式、代入、化简与结论。"
+                    "不要评价，不要复述题目，不要添加代码块。"
+                ),
+            },
+            {
+                "role": "user",
+                "content": f"题目：{question.strip()}\n已知最终答案：{answer}\n请补全完整推导过程。",
+            },
+        ]
+        text = self._chat_completion(messages, max_tokens=2048, temperature=0.2, top_p=0.4)
+        parsed = self._extract_json(text)
+        if parsed is None:
+            return result
+        expanded_reasoning = str(parsed.get("reasoning_process", "")).strip()
+        if not expanded_reasoning:
+            return result
+        return {"reasoning_process": expanded_reasoning, "answer": answer}
+
+    @staticmethod
+    @_log_call
+    def _contains_unstated_monotonicity(question: str, reasoning: str) -> bool:
+        q_text = (question or "").strip()
+        r_text = (reasoning or "").strip()
+        if not r_text:
+            return False
+        terms = [
+            "单调",
+            "严格单调",
+            "单调性",
+            "单调递增",
+            "单调递减",
+            "递增",
+            "递减",
+            "增函数",
+            "减函数",
+        ]
+        if any(term in r_text for term in terms) and not any(term in q_text for term in terms):
+            return True
+        if re.search(r"f'\s*[>≥]\s*0", r_text) and not re.search(r"f'\s*[>≥]\s*0", q_text):
+            return True
+        if re.search(r"f'\s*[<≤]\s*0", r_text) and not re.search(r"f'\s*[<≤]\s*0", q_text):
+            return True
+        return False
+
+    @_log_call
+    def _ensure_no_unstated_assumptions(self, question: str, result: Dict[str, str]) -> Dict[str, str]:
+        reasoning = str(result.get("reasoning_process", "")).strip()
+        if not self._contains_unstated_monotonicity(question, reasoning):
+            return result
+        answer = str(result.get("answer", "")).strip()
+        messages = [
+            {
+                "role": "system",
+                "content": (
+                    "你是推导修正器，只输出 JSON，对象包含 reasoning_process 与 answer 两个字符串字段。"
+                    "不得引入题目未给出的条件，尤其禁止假设单调/凸性/有界。"
+                    "请在不增加新假设的前提下改写推导，保持答案不变，步骤至少 3 步。"
+                ),
+            },
+            {
+                "role": "user",
+                "content": (
+                    f"题目：{question.strip()}\n"
+                    f"当前推导：{reasoning}\n"
+                    f"已知答案：{answer}\n"
+                    "请改写推导，去除未给出的假设。"
+                ),
+            },
+        ]
+        text = self._chat_completion(messages, max_tokens=900, temperature=0.2, top_p=0.4)
+        parsed = self._extract_json(text)
+        if parsed is None:
+            return result
+        fixed_reasoning = str(parsed.get("reasoning_process", "")).strip()
+        if not fixed_reasoning:
+            return result
+        return {"reasoning_process": fixed_reasoning, "answer": answer}
+
+    @staticmethod
+    @_log_call
+    def _needs_proof_rigor(question: str, reasoning: str) -> bool:
+        q_text = (question or "").strip()
+        r_text = (reasoning or "").strip()
+        if not q_text or not r_text:
+            return False
+        if not re.search(r"证明|prove", q_text, re.IGNORECASE):
+            return False
+        vague_markers = ["显然", "不难", "容易", "略", "省略", "可得", "可知", "可选取", "可以选取"]
+        if any(marker in r_text for marker in vague_markers):
+            return True
+        if "存在" in r_text and "使得" in r_text:
+            construction_markers = ["定义", "构造", "递归", "归纳", "下确界", "inf", "最小", "最小点"]
+            if not any(marker in r_text for marker in construction_markers):
+                return True
+        return False
+
+    @_log_call
+    def _ensure_proof_rigor(self, question: str, result: Dict[str, str]) -> Dict[str, str]:
+        reasoning = str(result.get("reasoning_process", "")).strip()
+        if not self._needs_proof_rigor(question, reasoning):
+            return result
+        answer = str(result.get("answer", "")).strip()
+        messages = [
+            {
+                "role": "system",
+                "content": (
+                    "你是证明严谨性修正器，只输出 JSON，对象包含 reasoning_process 与 answer 两个字符串字段。"
+                    "请补全存在性/选点/排序等步骤中的严格论证，给出明确构造（如递归取点或下确界定义）。"
+                    "避免使用‘显然/容易/略/可选取’等含糊表述，步骤至少 3 步。"
+                ),
+            },
+            {
+                "role": "user",
+                "content": (
+                    f"题目：{question.strip()}\n"
+                    f"当前推导：{reasoning}\n"
+                    f"已知答案：{answer}\n"
+                    "请改写为严谨推导。"
+                ),
+            },
+        ]
+        text = self._chat_completion(messages, max_tokens=1100, temperature=0.2, top_p=0.4)
+        parsed = self._extract_json(text)
+        if parsed is None:
+            return result
+        fixed_reasoning = str(parsed.get("reasoning_process", "")).strip()
+        if not fixed_reasoning:
+            return result
+        return {"reasoning_process": fixed_reasoning, "answer": answer}
+
+    @staticmethod
+    @_log_call
+    def _needs_operation_consistency_fix(reasoning: str) -> bool:
+        r_text = (reasoning or "").strip()
+        if not r_text:
+            return False
+        if re.search(r"相[加减].{0,6}(消去|消元|抵消)", r_text):
+            return True
+        if "相减" in r_text and "消去" in r_text:
+            return True
+        if "相加" in r_text and "消去" in r_text:
+            return True
+        return False
+
+    @_log_call
+    def _ensure_operation_consistency(self, question: str, result: Dict[str, str]) -> Dict[str, str]:
+        reasoning = str(result.get("reasoning_process", "")).strip()
+        if not self._needs_operation_consistency_fix(reasoning):
+            return result
+        answer = str(result.get("answer", "")).strip()
+        messages = [
+            {
+                "role": "system",
+                "content": (
+                    "你是表述一致性修正器，只输出 JSON，对象包含 reasoning_process 与 answer 两个字符串字段。"
+                    "请检查相加/相减/线性组合等表述是否与后续公式一致，必要时改为正确操作或改成明确的线性组合表述。"
+                    "不要改变公式结果与答案，步骤至少 3 步，不要添加代码块。"
+                ),
+            },
+            {
+                "role": "user",
+                "content": (
+                    f"题目：{question.strip()}\n"
+                    f"当前推导：{reasoning}\n"
+                    f"已知答案：{answer}\n"
+                    "请修正表述不一致的问题。"
+                ),
+            },
+        ]
+        text = self._chat_completion(messages, max_tokens=900, temperature=0.2, top_p=0.4)
+        parsed = self._extract_json(text)
+        if parsed is None:
+            return result
+        fixed_reasoning = str(parsed.get("reasoning_process", "")).strip()
+        if not fixed_reasoning:
+            return result
+        return {"reasoning_process": fixed_reasoning, "answer": answer}
+
+    @staticmethod
+    @_log_call
+    def _needs_answer_repair(question: str, answer: str) -> bool:
+        q_text = (question or "").strip()
+        a_text = (answer or "").strip()
+        if not a_text:
+            return True
+        if re.search(r"证明|prove", q_text, re.IGNORECASE):
+            proof_placeholders = {"证毕", "证明完毕", "QED", "成立", "已证"}
+            if a_text in proof_placeholders:
+                return True
+            if any(token in a_text for token in proof_placeholders):
+                return True
+            if len(a_text) < 6 and not re.search(r"=|lim|->|→|∞|\\", a_text):
+                return True
+        if any(token in a_text for token in ["lim", "->", "→"]):
+            return True
+        if any(token in a_text for token in ["。", "，", ",", "=", ";", "；"]) and len(a_text) < 6:
+            return True
+        if "∞" in a_text and a_text not in {"∞", "+∞", "-∞", "无穷大", "发散", "不存在"}:
+            return True
+        normalized = q_text.replace("\\to", "->").replace("\u2192", "->")
+        match = re.search(r"(?:\\lim|lim)\s*_\{?\s*(?P<var>[a-zA-Z])\s*->", normalized)
+        if match:
+            var = match.group("var")
+            if re.search(rf"(?<![A-Za-z0-9_]){re.escape(var)}(?![A-Za-z0-9_])", a_text):
+                return True
+            if re.search(rf"{re.escape(var)}\s*\\pi|{re.escape(var)}\s*π", a_text):
+                return True
+            if re.search(rf"{re.escape(var)}\s*\+|{re.escape(var)}\s*-", a_text):
+                return True
+        if re.search(r"a_n|a_n|a_\{n\}", a_text):
+            return True
+        return False
+
+    @_log_call
+    def _ensure_answer_validity(self, question: str, result: Dict[str, str]) -> Dict[str, str]:
+        answer = str(result.get("answer", "")).strip()
+        if not self._needs_answer_repair(question, answer):
+            return result
+        reasoning = str(result.get("reasoning_process", "")).strip()
+        conclusion = self._extract_conclusion_from_reasoning(reasoning)
+        if conclusion:
+            return {"reasoning_process": reasoning, "answer": conclusion}
+        cleaned = re.sub(r"(证毕|证明完毕|QED|已证|成立)[。．\.]*", "", answer).strip()
+        if cleaned and cleaned != answer:
+            return {"reasoning_process": reasoning, "answer": cleaned}
+        messages = [
+            {
+                "role": "system",
+                "content": (
+                    "你是答案校验修正器，只输出 JSON，对象包含 reasoning_process 与 answer 两个字符串字段。"
+                    "请检查答案是否仍含极限变量或不完整表达；若有，给出正确极限结果。"
+                    "必要时同步修正推导，使结论与步骤一致，步骤至少 3 步。"
+                ),
+            },
+            {
+                "role": "user",
+                "content": (
+                    f"题目：{question.strip()}\n"
+                    f"当前推导：{reasoning}\n"
+                    f"当前答案：{answer}\n"
+                    "请修正答案（必要时修正推导）。"
+                ),
+            },
+        ]
+        text = self._chat_completion(messages, max_tokens=1000, temperature=0.2, top_p=0.4)
+        parsed = self._ensure_schema(text)
+        fixed_reasoning = str(parsed.get("reasoning_process", "")).strip() or reasoning
+        fixed_answer = str(parsed.get("answer", "")).strip() or answer
+        return {"reasoning_process": fixed_reasoning, "answer": fixed_answer}
+
+    @_log_call
+    def _verify_solution(self, question: str, result: Dict[str, str]) -> Dict[str, str]:
+        if FAST_MODE:
+            return result
+        if re.search(r"证明|prove", question, re.IGNORECASE):
+            return result
+        if not re.search(r"计算|求|极限|积分|级数|求和|求导", question):
+            return result
+
+        reasoning = str(result.get("reasoning_process", "")).strip()
+        answer = str(result.get("answer", "")).strip()
+        messages = [
+            {
+                "role": "system",
+                "content": (
+                    "你是解答校验器，请独立复算并核对答案。"
+                    "如发现错误或不严谨，请给出修正后的 reasoning_process 与 answer。"
+                    "输出必须是 JSON，只包含 reasoning_process 与 answer 两个字段。"
+                ),
+            },
+            {
+                "role": "user",
+                "content": (
+                    f"题目：{question.strip()}\n"
+                    f"当前推导：{reasoning}\n"
+                    f"当前答案：{answer}\n"
+                    "请核对并修正（如有必要）。"
+                ),
+            },
+        ]
+        text = self._chat_completion(messages, max_tokens=1200, temperature=0.2, top_p=0.4)
+        parsed = self._ensure_schema(text)
+        fixed_reasoning = str(parsed.get("reasoning_process", "")).strip() or reasoning
+        fixed_answer = str(parsed.get("answer", "")).strip() or answer
+        return {"reasoning_process": fixed_reasoning, "answer": fixed_answer}
+
+    @staticmethod
+    @_log_call
+    def _extract_conclusion_from_reasoning(reasoning: str) -> str:
+        if not reasoning:
+            return ""
+        patterns = [
+            r"(lim_\{[^}]+\}[^。\n]*=\s*[^。\n]+)",
+            r"(lim_{[^}]+}[^。\n]*=\s*[^。\n]+)",
+            r"(lim_{[^}]+}[^。\n]*)",
+            r"极限为([^。\n]+)",
+            r"结果为([^。\n]+)",
+        ]
+        for pattern in patterns:
+            match = re.search(pattern, reasoning)
+            if match:
+                return match.group(1).strip()
+        return ""
+
+    @_log_call
     def _solve_with_ltm(self, question: str) -> Dict[str, str]:
         sub_questions = self._decompose_question(question)
         if not sub_questions:
+            logger.info("[%s] if-branch@L1241", "_solve_with_ltm")
             return self._solve_default(question)
 
         context_lines: List[str] = []
@@ -1198,6 +1951,7 @@ class KimiCalculusAgent:
         final_text = self._chat_completion(messages, max_tokens=MAX_TOKENS, temperature=0.2, top_p=0.4)
         return self._ensure_schema(final_text)
 
+    @_log_call
     def _solve_with_step_back(self, question: str) -> Dict[str, str]:
         abstraction_messages = [
             {
@@ -1210,6 +1964,7 @@ class KimiCalculusAgent:
             abstraction_messages, max_tokens=STEP_BACK_PRINCIPLE_MAX_TOKENS, temperature=0.2, top_p=0.4
         ).strip()
         if not principles:
+            logger.info("[%s] if-branch@L1275", "_solve_with_step_back")
             return self._solve_default(question)
 
         principles_ctx = self._truncate(principles, STEP_BACK_CONTEXT_MAX_CHARS)
@@ -1224,10 +1979,12 @@ class KimiCalculusAgent:
         parsed["reasoning_process"] = prefix + parsed.get("reasoning_process", "")
         return parsed
 
+    @_log_call
     def _solve_with_prm(self, question: str) -> Dict[str, str]:
         steps = self._prm_generate_steps(question, [], restart_from=1, error_reason="")
         steps = self._prm_extract_steps(steps)[:PRM_MAX_STEPS]
         if not steps:
+            logger.info("[%s] if-branch@L1294", "_solve_with_prm")
             return self._solve_default(question)
 
         verdicts: List[Tuple[bool, str]] = []
@@ -1239,11 +1996,13 @@ class KimiCalculusAgent:
                 valid, reason = self._prm_verify_step(question, steps[:idx], step, idx + 1)
                 verdicts.append((valid, reason))
                 if not valid:
+                    logger.info("[%s] if-branch@L1305", "_solve_with_prm")
                     invalid_idx = idx
                     invalid_reason = reason
                     break
 
             if invalid_idx is None:
+                logger.info("[%s] if-branch@L1310", "_solve_with_prm")
                 return self._prm_finalize_answer(question, steps, verdicts)
 
             keep = steps[:invalid_idx]
@@ -1252,11 +2011,13 @@ class KimiCalculusAgent:
             )
             new_steps = self._prm_extract_steps(regenerated)
             if not new_steps:
+                logger.info("[%s] if-branch@L1318", "_solve_with_prm")
                 break
             steps = (keep + new_steps)[:PRM_MAX_STEPS]
 
         return self._prm_finalize_answer(question, steps, verdicts)
 
+    @_log_call
     def _solve_with_constraints(self, question: str) -> Dict[str, str]:
         constraint_text = self._extract_constraints(question)
         constraint_ctx = self._truncate(constraint_text, CONSTRAINT_CONTEXT_MAX_CHARS) if constraint_text else ""
@@ -1265,20 +2026,25 @@ class KimiCalculusAgent:
         kb_context = self._build_kb_context(question)
         messages: List[Dict[str, str]] = [{"role": "system", "content": SYSTEM_PROMPT}]
         if constraint_ctx:
+            logger.info("[%s] if-branch@L1332", "_solve_with_constraints")
             messages.append({"role": "system", "content": "在解答过程中，你必须严格遵守以下条件：" + constraint_ctx})
         if few_shot_context:
+            logger.info("[%s] if-branch@L1334", "_solve_with_constraints")
             messages.append({"role": "system", "content": few_shot_context})
         if kb_context:
+            logger.info("[%s] if-branch@L1336", "_solve_with_constraints")
             messages.append({"role": "system", "content": kb_context})
         messages.append({"role": "user", "content": self._format_question(question)})
 
         final_text = self._chat_completion(messages, max_tokens=MAX_TOKENS, temperature=0.18, top_p=0.35)
         parsed = self._ensure_schema(final_text)
         if constraint_ctx:
+            logger.info("[%s] if-branch@L1342", "_solve_with_constraints")
             prefix = "System-2 约束清单：\n" + constraint_ctx + "\n"
             parsed["reasoning_process"] = prefix + parsed.get("reasoning_process", "")
         return parsed
 
+    @_log_call
     def _decompose_question(self, question: str) -> List[str]:
         messages = [
             {
@@ -1292,19 +2058,24 @@ class KimiCalculusAgent:
         return steps[:LTM_MAX_STEPS]
 
     @staticmethod
+    @_log_call
     def _parse_numbered_list(text: str) -> List[str]:
         lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
         items: List[str] = []
         for line in lines:
             match = re.match(r"^\s*\d+[).:\-]*\s*(.+)", line)
             if match:
+                logger.info("[%s] if-branch@L1367", "_parse_numbered_list")
                 candidate = match.group(1).strip().strip(";").strip("。")
                 if candidate:
+                    logger.info("[%s] if-branch@L1369", "_parse_numbered_list")
                     items.append(candidate)
         if not items and text.strip():
+            logger.info("[%s] if-branch@L1371", "_parse_numbered_list")
             items.append(text.strip())
         return items
 
+    @_log_call
     def _prm_generate_steps(
         self,
         question: str,
@@ -1315,9 +2086,11 @@ class KimiCalculusAgent:
         confirmed_text = "\n".join(f"<step {i + 1}>{s}</step>" for i, s in enumerate(confirmed_steps))
         user_content = ["题目：" + question.strip()]
         if confirmed_steps:
+            logger.info("[%s] if-branch@L1385", "_prm_generate_steps")
             user_content.append("已确认无误的前置步骤：")
             user_content.append(confirmed_text)
         if error_reason:
+            logger.info("[%s] if-branch@L1388", "_prm_generate_steps")
             user_content.append(f"上一轮在第 {restart_from} 步出现问题：{error_reason}。请从该步重写后续推导。")
         user_content.append(f"请从第 {restart_from} 步开始继续推导，总步数不超过 {PRM_MAX_STEPS}。")
         user_block = "\n".join(user_content)
@@ -1335,11 +2108,13 @@ class KimiCalculusAgent:
             messages, max_tokens=PRM_GENERATE_MAX_TOKENS, temperature=0.35, top_p=0.7
         )
 
+    @_log_call
     def _prm_extract_steps(self, text: str) -> List[str]:
         pattern = re.compile(r"<step[^>]*>(.*?)</step>", re.DOTALL | re.IGNORECASE)
         steps = [m.group(1).strip() for m in pattern.finditer(text)]
         return [s for s in steps if s]
 
+    @_log_call
     def _prm_verify_step(
         self, question: str, prior_steps: List[str], step: str, idx: int
     ) -> Tuple[bool, str]:
@@ -1363,11 +2138,13 @@ class KimiCalculusAgent:
             messages, max_tokens=PRM_VERIFY_MAX_TOKENS, temperature=0.0, top_p=0.1
         ).strip()
         if verdict.lower().startswith("valid"):
+            logger.info("[%s] if-branch@L1435", "_prm_verify_step")
             return True, ""
         match = re.match(r"invalid\s*:?\s*(.*)", verdict, re.IGNORECASE)
         reason = match.group(1).strip() if match else verdict
         return False, reason or "该步未通过验证"
 
+    @_log_call
     def _prm_finalize_answer(
         self, question: str, steps: List[str], verdicts: List[Tuple[bool, str]]
     ) -> Dict[str, str]:
@@ -1375,6 +2152,7 @@ class KimiCalculusAgent:
         for i, step in enumerate(steps, 1):
             verdict_note = ""
             if verdicts and i <= len(verdicts) and verdicts[i - 1][0] is False:
+                logger.info("[%s] if-branch@L1448", "_prm_finalize_answer")
                 verdict_note = f" (验证提示: {verdicts[i - 1][1]})"
             step_lines.append(f"步骤{i}: {step}{verdict_note}")
         stitched = "\n".join(step_lines)
@@ -1392,6 +2170,7 @@ class KimiCalculusAgent:
         parsed["reasoning_process"] = prefix + parsed.get("reasoning_process", "")
         return parsed
 
+    @_log_call
     def _extract_constraints(self, question: str) -> str:
         messages = [
             {
@@ -1405,14 +2184,18 @@ class KimiCalculusAgent:
         )
         parsed = self._extract_json(text)
         if parsed is None:
+            logger.info("[%s] if-branch@L1479", "_extract_constraints")
             return text.strip()
         constraints = parsed.get("constraints")
         if isinstance(constraints, list):
+            logger.info("[%s] if-branch@L1482", "_extract_constraints")
             return "\n".join(str(item).strip() for item in constraints if str(item).strip())
         if constraints:
+            logger.info("[%s] if-branch@L1484", "_extract_constraints")
             return str(constraints).strip()
         return text.strip()
 
+    @_log_call
     def _solve_with_pot(self, question: str) -> Optional[Dict[str, str]]:
         messages = [
             {"role": "system", "content": "你是编写可执行 Python 代码的助手，只输出代码，不要解释。避免网络与文件写入，只使用标准库和 math。"},
@@ -1428,6 +2211,7 @@ class KimiCalculusAgent:
             self._chat_completion(messages, max_tokens=POT_MAX_TOKENS, temperature=0.2, top_p=0.3)
         )
         if not code:
+            logger.info("[%s] if-branch@L1503", "_solve_with_pot")
             return None
 
         if len(code) > POT_MAX_CODE_CHARS or not self._is_pot_code_safe(code):
@@ -1438,6 +2222,7 @@ class KimiCalculusAgent:
         for attempt in range(POT_RETRY):
             stdout, stderr, returncode = self._run_python_code(code)
             if returncode == 0 and stdout.strip():
+                logger.info("[%s] if-branch@L1513", "_solve_with_pot")
                 return {
                     "reasoning_process": f"Program-of-Thought: 生成代码并在本地执行，第 {attempt + 1} 次尝试成功。",
                     "answer": stdout.strip(),
@@ -1455,11 +2240,13 @@ class KimiCalculusAgent:
                 self._chat_completion(fix_messages, max_tokens=POT_MAX_TOKENS, temperature=0.25, top_p=0.35)
             )
             if not code:
+                logger.info("[%s] if-branch@L1530", "_solve_with_pot")
                 break
 
         logger.warning("PoT 执行失败，将回退其他策略", extra={"error": last_error})
         return None
 
+    @_log_call
     def _run_python_code(self, code: str) -> Tuple[str, str, int]:
         tmp_path = ""
         try:
@@ -1474,27 +2261,35 @@ class KimiCalculusAgent:
             )
             stdout, stderr = result.stdout, result.stderr
             if len(stdout) > POT_MAX_OUTPUT_CHARS or stdout.count("\n") > POT_MAX_OUTPUT_LINES:
+                logger.info("[%s] if-branch@L1550", "_run_python_code")
                 stderr = stderr + f"\n输出超限: {len(stdout)} chars, {stdout.count('\\n')} lines"
                 return stdout[:POT_MAX_OUTPUT_CHARS], stderr.strip(), 1
             return stdout, stderr, result.returncode
         except subprocess.TimeoutExpired as exc:
+            logger.warning("[%s] except-branch@L1554", "_run_python_code", exc_info=True)
             return "", f"执行超时: {exc}", 1
         except Exception as exc:
+            logger.warning("[%s] except-branch@L1556", "_run_python_code", exc_info=True)
             return "", str(exc), 1
         finally:
             if tmp_path:
+                logger.info("[%s] if-branch@L1559", "_run_python_code")
                 try:
                     os.remove(tmp_path)
                 except Exception:
+                    logger.warning("[%s] except-branch@L1562", "_run_python_code", exc_info=True)
                     pass
 
+    @_log_call
     def _extract_code_only(self, text: str) -> str:
         cleaned = self._strip_code_fences(text.strip())
         if cleaned.startswith("python"):
+            logger.info("[%s] if-branch@L1568", "_extract_code_only")
             cleaned = cleaned[len("python"):].strip()
         return cleaned
 
     @staticmethod
+    @_log_call
     def _is_pot_code_safe(code: str) -> bool:
         lower = code.lower()
         blocked_keywords = [
@@ -1512,10 +2307,12 @@ class KimiCalculusAgent:
             "locals()",
         ]
         if any(bad in lower for bad in blocked_keywords):
+            logger.info("[%s] if-branch@L1590", "_is_pot_code_safe")
             return False
         return KimiCalculusAgent._is_pot_code_safe_ast(code)
 
     @staticmethod
+    @_log_call
     def _is_pot_code_safe_ast(code: str) -> bool:
         allowed_imports = POT_ALLOWED_IMPORTS
         blocked_calls = {"open", "exec", "eval", "__import__"}
@@ -1538,43 +2335,57 @@ class KimiCalculusAgent:
         }
 
         class Guard(ast.NodeVisitor):
+            @_log_call
             def __init__(self) -> None:
                 self.ok = True
 
+            @_log_call
             def visit_Import(self, node: ast.Import) -> None:  # noqa: D401
                 for alias in node.names:
                     if alias.name not in allowed_imports:
+                        logger.info("[%s] if-branch@L1625", "visit_Import")
                         self.ok = False
                 self.generic_visit(node)
 
+            @_log_call
             def visit_ImportFrom(self, node: ast.ImportFrom) -> None:  # noqa: D401
                 if node.module is None or node.module not in allowed_imports:
+                    logger.info("[%s] if-branch@L1631", "visit_ImportFrom")
                     self.ok = False
                 self.generic_visit(node)
 
+            @_log_call
             def visit_Call(self, node: ast.Call) -> None:  # noqa: D401
                 if isinstance(node.func, ast.Name):
+                    logger.info("[%s] if-branch@L1637", "visit_Call")
                     if node.func.id in blocked_calls:
+                        logger.info("[%s] if-branch@L1638", "visit_Call")
                         self.ok = False
                 if isinstance(node.func, ast.Attribute):
+                    logger.info("[%s] if-branch@L1640", "visit_Call")
                     root = node.func.value
                     if isinstance(root, ast.Name) and root.id in blocked_modules:
+                        logger.info("[%s] if-branch@L1642", "visit_Call")
                         self.ok = False
                 self.generic_visit(node)
 
+            @_log_call
             def visit_Attribute(self, node: ast.Attribute) -> None:  # noqa: D401
                 if isinstance(node.value, ast.Name) and node.value.id in blocked_modules:
+                    logger.info("[%s] if-branch@L1648", "visit_Attribute")
                     self.ok = False
                 self.generic_visit(node)
 
         try:
             tree = ast.parse(code, mode="exec")
         except SyntaxError:
+            logger.warning("[%s] except-branch@L1654", "_is_pot_code_safe_ast", exc_info=True)
             return False
         guard = Guard()
         guard.visit(tree)
         return guard.ok
 
+    @_log_call
     def _self_consistency(self, question: str, samples: int = SELF_CONSISTENCY_SAMPLES) -> Dict[str, str]:
         async def _gather() -> List[Dict[str, str]]:
             loop = asyncio.get_running_loop()
@@ -1584,6 +2395,7 @@ class KimiCalculusAgent:
         try:
             results = asyncio.run(_gather())
         except RuntimeError:
+            logger.warning("[%s] except-branch@L1669", "_self_consistency", exc_info=True)
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
             results = loop.run_until_complete(_gather())
@@ -1598,17 +2410,20 @@ class KimiCalculusAgent:
             clean_results.append(res)
 
         if not clean_results:
+            logger.info("[%s] if-branch@L1683", "_self_consistency")
             return self._solve_default(question)
 
         answers = [self._normalize_fraction(item.get("answer", "")) for item in clean_results]
         counter = Counter(answers)
         if not counter:
+            logger.info("[%s] if-branch@L1688", "_self_consistency")
             return self._solve_default(question)
         best_answer, freq = counter.most_common(1)[0]
         vote_lines = [f"样本{i + 1}: {clean_results[i].get('answer', '').strip()}" for i in range(len(clean_results))]
         reasoning = "Self-Consistency 多样化采样投票，最高票 {} 次。\n".format(freq) + "\n".join(vote_lines)
         return {"reasoning_process": reasoning, "answer": best_answer or clean_results[0].get("answer", "")}
 
+    @_log_call
     def _single_consistency_sample(self, question: str) -> Dict[str, str]:
         messages = self._build_messages(question)
         text = self._chat_completion(
@@ -1618,6 +2433,7 @@ class KimiCalculusAgent:
         )
         return self._ensure_schema(text)
 
+    @_log_call
     def _solve_with_tot(self, question: str) -> Dict[str, str]:
         root = {"path": [], "score": 0.0}
         frontier = [root]
@@ -1630,15 +2446,18 @@ class KimiCalculusAgent:
                     new_frontier.append({"path": node["path"] + [branch], "score": score})
 
             if not new_frontier:
+                logger.info("[%s] if-branch@L1717", "_solve_with_tot")
                 break
             frontier = sorted(new_frontier, key=lambda x: x["score"], reverse=True)[:TOT_BEAM_WIDTH]
 
         if not frontier:
+            logger.info("[%s] if-branch@L1721", "_solve_with_tot")
             return self._solve_default(question)
 
         best = frontier[0]
         return self._finalize_tot_answer(question, best)
 
+    @_log_call
     def _generate_branches(self, question: str, path: List[str], branching: int) -> List[str]:
         path_text = "\n".join(f"步骤{i + 1}: {step}" for i, step in enumerate(path)) or "(尚未展开)"
         messages = [
@@ -1659,9 +2478,11 @@ class KimiCalculusAgent:
             clean = re.sub(r"^\s*\d+[\).:\-]*\s*", "", line)
             branches.append(clean)
             if len(branches) >= branching:
+                logger.info("[%s] if-branch@L1747", "_generate_branches")
                 break
         return branches
 
+    @_log_call
     def _evaluate_branch(self, question: str, path: List[str], branch: str) -> float:
         messages = [
             {"role": "system", "content": "你是评估器，只返回 1-10 的整数评分，数字之外不要输出。"},
@@ -1678,9 +2499,11 @@ class KimiCalculusAgent:
         text = self._chat_completion(messages, max_tokens=16, temperature=0.0, top_p=0.1)
         match = re.search(r"10|[1-9]", text)
         if not match:
+            logger.info("[%s] if-branch@L1767", "_evaluate_branch")
             return 5.0
         return float(match.group(0))
 
+    @_log_call
     def _finalize_tot_answer(self, question: str, node: Dict[str, Any]) -> Dict[str, str]:
         path_lines = "\n".join(f"步骤{i + 1}: {step}" for i, step in enumerate(node.get("path", [])))
         messages = [
@@ -1700,12 +2523,14 @@ class KimiCalculusAgent:
         parsed["reasoning_process"] = reasoning_prefix + parsed.get("reasoning_process", "")
         return parsed
 
+    @_log_call
     def _solve_with_mcts(self, question: str) -> Dict[str, str]:
         root = _MCTSNode(path=[])
         last_score = 0.0
         for _ in range(MCTS_SIMULATIONS):
             leaf = self._mcts_select(root)
             if leaf.visits == 0 and leaf.path:
+                logger.info("[%s] if-branch@L1797", "_solve_with_mcts")
                 rollout = self._mcts_rollout(question, leaf.path)
                 last_score = rollout.get("score", 0.0)
                 self._mcts_backpropagate(leaf, last_score)
@@ -1716,6 +2541,7 @@ class KimiCalculusAgent:
 
             branches = self._generate_branches(question, leaf.path, MCTS_MAX_BRANCH)
             if not branches:
+                logger.info("[%s] if-branch@L1807", "_solve_with_mcts")
                 rollout = self._mcts_rollout(question, leaf.path)
                 last_score = rollout.get("score", 0.0)
                 self._mcts_backpropagate(leaf, last_score)
@@ -1725,6 +2551,7 @@ class KimiCalculusAgent:
                 continue
 
             if not leaf.children:
+                logger.info("[%s] if-branch@L1816", "_solve_with_mcts")
                 for step in branches:
                     child = _MCTSNode(path=leaf.path + [step], parent=leaf, action=step)
                     leaf.children.append(child)
@@ -1738,27 +2565,33 @@ class KimiCalculusAgent:
             child.rollout_score = last_score
 
         if not root.children:
+            logger.info("[%s] if-branch@L1829", "_solve_with_mcts")
             return self._solve_with_tot(question)
 
         best = max(root.children, key=lambda n: (n.value / max(n.visits, 1)))
         return self._mcts_finalize(question, best)
 
+    @_log_call
     def _mcts_select(self, node: _MCTSNode) -> _MCTSNode:
         current = node
         while current.children:
             unvisited = [c for c in current.children if c.visits == 0]
             if unvisited:
+                logger.info("[%s] if-branch@L1840", "_mcts_select")
                 return unvisited[0]
             current = max(current.children, key=lambda c: self._mcts_ucb(c))
         return current
 
+    @_log_call
     def _mcts_ucb(self, node: _MCTSNode) -> float:
         if node.visits == 0 or node.parent is None:
+            logger.info("[%s] if-branch@L1847", "_mcts_ucb")
             return float("inf")
         exploit = node.value / node.visits
         explore = MCTS_UCB_C * math.sqrt(math.log(node.parent.visits + 1) / (node.visits + 1))
         return exploit + explore
 
+    @_log_call
     def _mcts_rollout(self, question: str, path: List[str]) -> Dict[str, Any]:
         path_lines = "\n".join(f"步骤{i + 1}: {step}" for i, step in enumerate(path)) or "(当前尚无步骤)"
         messages = [
@@ -1788,11 +2621,13 @@ class KimiCalculusAgent:
         try:
             score = float(confidence_raw)
         except Exception:
+            logger.warning("[%s] except-branch@L1882", "_mcts_rollout", exc_info=True)
             match = re.search(r"0\.\d+|1\.0|1", str(confidence_raw))
             score = float(match.group(0)) if match else 0.0
         score = max(0.0, min(score, 1.0))
         return {"reasoning": reasoning, "answer": answer, "score": score}
 
+    @_log_call
     def _mcts_backpropagate(self, node: _MCTSNode, score: float) -> None:
         current: Optional[_MCTSNode] = node
         while current is not None:
@@ -1800,6 +2635,7 @@ class KimiCalculusAgent:
             current.value += score
             current = current.parent
 
+    @_log_call
     def _mcts_finalize(self, question: str, node: _MCTSNode) -> Dict[str, str]:
         path_lines = "\n".join(f"步骤{i + 1}: {step}" for i, step in enumerate(node.path))
         rollout_hint = node.rollout_reasoning or "(无)"
@@ -1824,6 +2660,7 @@ class KimiCalculusAgent:
         parsed["reasoning_process"] = prefix + parsed.get("reasoning_process", "")
         return parsed
 
+    @_log_call
     def _solve_with_debate(self, question: str) -> Dict[str, str]:
         solver_output = self._chat_completion(
             [
@@ -1846,6 +2683,7 @@ class KimiCalculusAgent:
                 top_p=0.6,
             )
             if re.search(r"无(明显)?问题|通过|正确", critic_feedback):
+                logger.info("[%s] if-branch@L1943", "_solve_with_debate")
                 break
             solver_output = self._chat_completion(
                 [
@@ -1860,23 +2698,29 @@ class KimiCalculusAgent:
         return self._ensure_schema(solver_output)
 
     @staticmethod
+    @_log_call
     def _normalize_answer(ans: str) -> str:
         clean = re.sub(r"\s+", "", ans).strip().lower()
         clean = clean.replace("。", "")
         return clean
 
+    @_log_call
     def _normalize_fraction(self, ans: str) -> str:
         base = self._normalize_answer(ans)
         if not sp:
+            logger.info("[%s] if-branch@L1967", "_normalize_fraction")
             return base
         try:
             expr = sp.nsimplify(ans)
             if expr.is_rational:
+                logger.info("[%s] if-branch@L1971", "_normalize_fraction")
                 return str(sp.Rational(expr))
             return str(expr)
         except Exception:
+            logger.warning("[%s] except-branch@L1974", "_normalize_fraction", exc_info=True)
             return base
 
+    @_log_call
     def _chat_completion(
         self,
         messages: List[Dict[str, str]],
@@ -1906,6 +2750,7 @@ class KimiCalculusAgent:
                 content = response.json()["choices"][0]["message"]["content"]
                 return self._sanitize_output(content)
             except Exception as exc:  # noqa: BLE001
+                logger.warning("[%s] except-branch@L2006", "_chat_completion", exc_info=True)
                 last_error = exc
                 logger.warning("Kimi API call failed, will retry if allowed", exc_info=exc)
                 continue
@@ -1914,36 +2759,44 @@ class KimiCalculusAgent:
         return '{"reasoning_process": "解题失败：调用 Kimi 接口出现错误。请检查 API Key、网络或模型配置。", "answer": "无法生成答案"}'
 
     @staticmethod
+    @_log_call
     def _sanitize_output(text: str) -> str:
         text = text.strip()
         text = KimiCalculusAgent._strip_code_fences(text)
         return text
 
     @staticmethod
+    @_log_call
     def _strip_code_fences(text: str) -> str:
         if text.startswith("```") and text.endswith("```"):
+            logger.info("[%s] if-branch@L2024", "_strip_code_fences")
             text = text.split("\n", 1)[-1]
             text = text.rsplit("```", 1)[0]
         return text.strip()
 
+    @_log_call
     def _kb_lookup(self, question: str) -> List[Dict[str, Any]]:
         if not self._kb_entries:
+            logger.info("[%s] if-branch@L2031", "_kb_lookup")
             return []
         direct_matches = self._direct_theory_matches(question)
         candidates: List[Dict[str, Any]] = []
         for entry in self._kb_entries:
             score = self._kb_entry_score(question, entry, direct_matches=direct_matches)
             if score <= 0:
+                logger.info("[%s] if-branch@L2037", "_kb_lookup")
                 continue
             candidates.append(self._entry_to_kb_hit(entry, score))
         candidates.sort(key=lambda x: x["score"], reverse=True)
         return candidates[:KB_TOP_K]
 
+    @_log_call
     def decompose_with_knowledge(self, question: str) -> List[Dict[str, Any]]:
         """将题目拆解为知识点命中列表，供外部 API 或调试直接调用。"""
         hits = self._kb_lookup(question)
         direct_targets = self._direct_theory_matches(question)
         if not direct_targets:
+            logger.info("[%s] if-branch@L2048", "decompose_with_knowledge")
             return hits
 
         forced_hits = self._lookup_targets_from_kb(direct_targets)
@@ -1951,18 +2804,22 @@ class KimiCalculusAgent:
         top_k = max(KB_TOP_K, min(KB_MERGED_TOP_K, len(direct_targets) + 2))
         return merged_hits[:top_k]
 
+    @_log_call
     def _lookup_targets_from_kb(self, targets: List[str]) -> List[Dict[str, Any]]:
         if not self._kb_entries:
+            logger.info("[%s] if-branch@L2058", "_lookup_targets_from_kb")
             return []
 
         forced_hits: List[Dict[str, Any]] = []
         for target in targets:
             target_norm = self._normalize_lookup_text(target)
             if not target_norm:
+                logger.info("[%s] if-branch@L2064", "_lookup_targets_from_kb")
                 continue
 
             entry = self._kb_name_index.get(target_norm)
             if entry is not None:
+                logger.info("[%s] if-branch@L2068", "_lookup_targets_from_kb")
                 forced_hits.append(self._entry_to_kb_hit(entry, 120.0))
                 continue
 
@@ -1972,6 +2829,7 @@ class KimiCalculusAgent:
                 name = str(candidate.get("name", "")).strip()
                 aliases = [str(x).strip() for x in (candidate.get("aliases") or []) if str(x).strip()]
                 if not name and not aliases:
+                    logger.info("[%s] if-branch@L2077", "_lookup_targets_from_kb")
                     continue
 
                 name_norm = self._normalize_lookup_text(name)
@@ -1991,20 +2849,26 @@ class KimiCalculusAgent:
 
                 score = 0.0
                 if name_norm and (target_norm == name_norm or target_norm in name_norm or name_norm in target_norm):
+                    logger.info("[%s] if-branch@L2096", "_lookup_targets_from_kb")
                     score = max(score, 95.0)
                 for alias_norm in alias_norms:
                     if alias_norm and (target_norm == alias_norm or target_norm in alias_norm or alias_norm in target_norm):
+                        logger.info("[%s] if-branch@L2099", "_lookup_targets_from_kb")
                         score = max(score, 90.0)
                 if entry_text and target_norm in entry_text:
+                    logger.info("[%s] if-branch@L2101", "_lookup_targets_from_kb")
                     score = max(score, 82.0)
 
                 if score > best_score:
+                    logger.info("[%s] if-branch@L2104", "_lookup_targets_from_kb")
                     best_score = score
                     best_entry = candidate
 
             if best_entry is not None:
+                logger.info("[%s] if-branch@L2108", "_lookup_targets_from_kb")
                 forced_hits.append(self._entry_to_kb_hit(best_entry, best_score))
             else:
+                logger.info("[%s] else-branch@L2110", "_lookup_targets_from_kb")
                 forced_hits.append(
                     {
                         "score": 70.0,
@@ -2017,6 +2881,7 @@ class KimiCalculusAgent:
 
         return forced_hits
 
+    @_log_call
     def _kb_entry_score(
         self,
         question: str,
@@ -2029,32 +2894,39 @@ class KimiCalculusAgent:
 
         name = str(entry.get("name", "")).strip()
         if not name:
+            logger.info("[%s] if-branch@L2135", "_kb_entry_score")
             return 0.0
 
         name_norm = self._normalize_lookup_text(name)
         if name_norm and name_norm in question_norm:
+            logger.info("[%s] if-branch@L2139", "_kb_entry_score")
             score += 10.0
 
         aliases = entry.get("aliases") or []
         for alias in aliases:
             alias_norm = self._normalize_lookup_text(str(alias))
             if alias_norm and alias_norm in question_norm:
+                logger.info("[%s] if-branch@L2145", "_kb_entry_score")
                 score += 6.0
 
         keywords = entry.get("keywords") or []
         for kw in keywords:
             kw_text = str(kw).strip()
             if not kw_text:
+                logger.info("[%s] if-branch@L2151", "_kb_entry_score")
                 continue
             if kw_text in question or kw_text.lower() in question_lower:
+                logger.info("[%s] if-branch@L2153", "_kb_entry_score")
                 score += 3.0
 
         related_types = entry.get("related_types") or []
         for tp in related_types:
             tp_text = str(tp).strip()
             if not tp_text:
+                logger.info("[%s] if-branch@L2159", "_kb_entry_score")
                 continue
             if tp_text in question or tp_text.lower() in question_lower:
+                logger.info("[%s] if-branch@L2161", "_kb_entry_score")
                 score += 2.0
 
         q_tokens = set(self._tokenize(question))
@@ -2064,6 +2936,7 @@ class KimiCalculusAgent:
         formulas = entry.get("formulas") or []
         formula_text = " ".join(str(f) for f in formulas)
         if formula_text:
+            logger.info("[%s] if-branch@L2170", "_kb_entry_score")
             score += float(self._similarity_score(question, formula_text)) * 0.4
 
         direct_matches = direct_matches if direct_matches is not None else self._direct_theory_matches(question)
@@ -2083,62 +2956,79 @@ class KimiCalculusAgent:
         for hint in direct_matches:
             hint_norm = self._normalize_lookup_text(hint)
             if not hint_norm:
+                logger.info("[%s] if-branch@L2189", "_kb_entry_score")
                 continue
             if hint_norm == self._normalize_lookup_text(name):
+                logger.info("[%s] if-branch@L2191", "_kb_entry_score")
                 score += 12.0
             elif any(hint_norm == self._normalize_lookup_text(str(alias)) for alias in aliases):
+                logger.info("[%s] if-branch@L2193", "_kb_entry_score")
                 score += 10.0
             elif hint_norm in entry_text:
+                logger.info("[%s] if-branch@L2195", "_kb_entry_score")
                 score += 4.0
 
         return score
 
+    @_log_call
     def _matched_theory_rules(self, question: str) -> List[Dict[str, Any]]:
         lowered = question.lower()
         matched: List[Dict[str, Any]] = []
         for rule in THEORY_DIRECT_MAP_RULES:
             signals = [str(x) for x in rule.get("signals", [])]
             if not signals:
+                logger.info("[%s] if-branch@L2206", "_matched_theory_rules")
                 continue
             if any(sig in question or sig.lower() in lowered for sig in signals):
+                logger.info("[%s] if-branch@L2208", "_matched_theory_rules")
                 matched.append(rule)
         return matched
 
+    @_log_call
     def _direct_theory_matches(self, question: str) -> List[str]:
         matches: List[str] = []
         for rule in self._matched_theory_rules(question):
             for target in rule.get("targets", []):
                 target_text = str(target).strip()
                 if target_text and target_text not in matches:
+                    logger.info("[%s] if-branch@L2218", "_direct_theory_matches")
                     matches.append(target_text)
         return matches
 
+    @_log_call
     def _build_mapping_reminders(self, question: str) -> List[str]:
         reminders: List[str] = []
         for rule in self._matched_theory_rules(question):
             reminder = str(rule.get("reminder", "")).strip()
             if reminder and reminder not in reminders:
+                logger.info("[%s] if-branch@L2227", "_build_mapping_reminders")
                 reminders.append(reminder)
         return reminders
 
+    @_log_call
     def _extract_theory_hints(self, question: str) -> List[str]:
         direct_matches = self._direct_theory_matches(question)
         if direct_matches:
+            logger.info("[%s] if-branch@L2234", "_extract_theory_hints")
             return direct_matches
         fallback_hits = self._kb_lookup(question)
         return [str(hit.get("name", "")).strip() for hit in fallback_hits if str(hit.get("name", "")).strip()]
 
+    @_log_call
     def _build_kb_context(self, question: str) -> str:
         hits = self.decompose_with_knowledge(question)
         if not hits:
+            logger.info("[%s] if-branch@L2242", "_build_kb_context")
             return ""
         direct_matches = self._direct_theory_matches(question)
         hints = self._extract_theory_hints(question)
         reminders = self._build_mapping_reminders(question)
         lines = ["以下是知识点库检索结果：请先按知识点拆解问题，再调用对应公式与原则进行推导。"]
         if direct_matches:
+            logger.info("[%s] if-branch@L2248", "_build_kb_context")
             lines.append("直接映射: " + " / ".join(direct_matches[:8]))
         if hints:
+            logger.info("[%s] if-branch@L2250", "_build_kb_context")
             lines.append("题面信号提示: " + " / ".join(hints[:6]))
         for reminder in reminders[:3]:
             lines.append("映射提醒: " + reminder)
@@ -2149,53 +3039,70 @@ class KimiCalculusAgent:
 
             lines.append(f"知识点{idx}: {hit.get('name', '')} (score={hit.get('score', 0):.2f})")
             if related_types:
+                logger.info("[%s] if-branch@L2260", "_build_kb_context")
                 lines.append("相关题型: " + " / ".join(str(x) for x in related_types[:3]))
             if formulas:
+                logger.info("[%s] if-branch@L2262", "_build_kb_context")
                 lines.append("可调用公式: " + " ; ".join(str(x) for x in formulas[:4]))
             if principles:
+                logger.info("[%s] if-branch@L2264", "_build_kb_context")
                 lines.append("使用原则: " + " ; ".join(str(x) for x in principles[:2]))
 
         return "\n".join(lines)
 
+    @_log_call
     def _extract_math_expression(self, text: str) -> Optional[str]:
         normalized = text.replace("×", "*").replace("÷", "/").replace("（", "(").replace("）", ")").strip()
         # Only treat input as local arithmetic when the whole prompt is an arithmetic expression.
         if re.search(r"[A-Za-z]", normalized):
+            logger.info("[%s] if-branch@L2273", "_extract_math_expression")
             return None
         if not re.fullmatch(r"[\d\.\s\+\-\*/\(\)\%\^=]+", normalized):
+            logger.info("[%s] if-branch@L2275", "_extract_math_expression")
             return None
 
         expr = normalized.replace("=", " ").strip()
         if not expr:
+            logger.info("[%s] if-branch@L2279", "_extract_math_expression")
             return None
         if not re.search(r"\d", expr):
+            logger.info("[%s] if-branch@L2281", "_extract_math_expression")
             return None
         if not re.search(r"[\+\-\*/\^%]", expr):
+            logger.info("[%s] if-branch@L2283", "_extract_math_expression")
             return None
         return expr.replace("^", "**")
 
+    @_log_call
     def _safe_eval(self, expr: str) -> float:
         node = ast.parse(expr, mode="eval")
         value = self._eval_ast(node.body)
         return float(value)
 
+    @_log_call
     def _eval_ast(self, node: ast.AST) -> float:
         if isinstance(node, ast.Constant):
+            logger.info("[%s] if-branch@L2295", "_eval_ast")
             if isinstance(node.value, (int, float)):
+                logger.info("[%s] if-branch@L2296", "_eval_ast")
                 return float(node.value)
             raise ValueError("表达式包含非法常量")
 
         if isinstance(node, ast.BinOp):
+            logger.info("[%s] if-branch@L2300", "_eval_ast")
             op_type = type(node.op)
             if op_type not in self._allowed_ops:
+                logger.info("[%s] if-branch@L2302", "_eval_ast")
                 raise ValueError("表达式包含不支持的二元运算")
             left = self._eval_ast(node.left)
             right = self._eval_ast(node.right)
             return float(self._allowed_ops[op_type](left, right))
 
         if isinstance(node, ast.UnaryOp):
+            logger.info("[%s] if-branch@L2308", "_eval_ast")
             op_type = type(node.op)
             if op_type not in self._allowed_unary_ops:
+                logger.info("[%s] if-branch@L2310", "_eval_ast")
                 raise ValueError("表达式包含不支持的一元运算")
             value = self._eval_ast(node.operand)
             return float(self._allowed_unary_ops[op_type](value))
