@@ -41,8 +41,8 @@ FAST_MODE = False
 DEFAULT_STRATEGY = "auto"
 SECOND_PASS_SCHEMA_FIX = True
 
-DEFAULT_MODEL = os.getenv("MODEL_NAME", "deepseek-chat")
-DEFAULT_BASE_URL = os.getenv("API_BASE_URL", "https://api.deepseek.com/v1/chat/completions")
+DEFAULT_MODEL = os.getenv("MODEL_NAME", "kimi-2.5")
+DEFAULT_BASE_URL = os.getenv("API_BASE_URL", "https://api.moonshot.cn/v1/chat/completions")
 DEFAULT_TIMEOUT = 60
 
 MAX_TOKENS = 4096
@@ -212,7 +212,7 @@ class KimiCalculusAgent:
         base_url: Optional[str] = None,
         timeout: Optional[int] = None,
     ) -> None:
-        self.api_key = api_key or os.getenv("DEEPSEEK_API_KEY") or os.getenv("KIMI_API_KEY") or ""
+        self.api_key = api_key or os.getenv("Kimi_API_KEY") or ""
         self.model = model or DEFAULT_MODEL
         self.base_url = base_url or DEFAULT_BASE_URL
         self.timeout = int(timeout or DEFAULT_TIMEOUT)
@@ -690,7 +690,7 @@ class KimiCalculusAgent:
     @_log_call
     def _load_examples(self) -> List[Dict[str, Any]]:
         try:
-            data_path = Path(__file__).resolve().parent.parent / "data" / "train.json"
+            data_path = Path(__file__).resolve().parent / "data" / "train.json"
             if not data_path.exists():
                 logger.info("[%s] if-branch@L641", "_load_examples")
                 return []
@@ -703,7 +703,7 @@ class KimiCalculusAgent:
 
     @_log_call
     def _load_or_build_knowledge_points(self) -> List[Dict[str, Any]]:
-        data_dir = Path(__file__).resolve().parent.parent / "data"
+        data_dir = Path(__file__).resolve().parent / "data"
         theory_path = data_dir / THEORY_FILE_NAME
         source_path = theory_path if theory_path.exists() else data_dir / "train.json"
         kb_path = data_dir / KB_FILE_NAME

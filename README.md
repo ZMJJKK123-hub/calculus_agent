@@ -21,16 +21,13 @@
 | 路径 | 作用 |
 | --- | --- |
 | `ourwork/` | 主工程目录（实际提交内容）。 |
-| `ourwork/agent/` | 求解器实现与策略逻辑。 |
 | `ourwork/data/` | 样例题与知识库数据。 |
 
 ### 2.2 关键文件
 
 | 路径 | 作用 | 维护要点 |
 | --- | --- | --- |
-| `ourwork/main.py` | 命令行入口；读取题目，调用 Agent，输出 JSON。 | 入口行为修改优先在这里做，不要在策略层混入 CLI 逻辑。 |
-| `ourwork/agent/__init__.py` | 导出 `KimiCalculusAgent`。 | 保持导出名称稳定，避免提交配置失效。 |
-| `ourwork/agent/calculus_agent.py` | 核心类与全部策略、知识检索、API 调用、输出清洗。 | 核心维护文件。改动需做回归验证。 |
+| `ourwork/calculus_agent.py` | 核心类与全部策略、知识检索、API 调用、输出清洗。 | 核心维护文件。改动需做回归验证。 |
 | `ourwork/data/train.json` | few-shot 与训练样例数据。 | 字段结构变更会影响 `_load_examples`。 |
 | `ourwork/data/theory.json` | 结构化理论知识库。 | 用于构建知识点索引。 |
 | `ourwork/data/knowledge_points.json` | 知识点缓存索引（可由 `theory.json` 自动重建）。 | 不一致时会自动重建。 |
@@ -44,34 +41,50 @@
 ```bash
 cd ourwork
 pip install -r requirements.txt
-python main.py "求极限 lim_{x->0} sinx/x"
+python -c "import json; from calculus_agent import KimiCalculusAgent; agent = KimiCalculusAgent(); print(json.dumps(agent.solve('求极限 lim_{x->0} sinx/x'), ensure_ascii=False))"
 ```
 
-### 3.2 输出约定
+### 3.2 官方评测调用方式
+
+评测侧会读取 [ourwork/submission.json](ourwork/submission.json)，并按以下信息加载类与方法：
+
+- `class`: `KimiCalculusAgent`
+- `method`: `solve`
+
+等价调用示例：
+
+```python
+from calculus_agent import KimiCalculusAgent
+
+agent = KimiCalculusAgent()
+result = agent.solve("求极限 lim_{x->0} sinx/x")
+```
+
+### 3.3 输出约定
 
 输出固定 JSON 字段：
 
 - `reasoning_process`
 - `answer`
 
-### 3.3 环境变量
+### 3.4 环境变量
 
 | 变量名 | 默认值 | 作用 |
 | --- | --- | --- |
-| `KIMI_API_KEY` | 无 | API Key（核心必需）。 |
+| `Kimi_API_KEY` | 无 | API Key（核心必需）。 |
 | `AGENT_STRATEGY` | `auto` | 强制指定策略（如 `pot`、`tot`、`mcts`）。 |
 | `AGENT_FAST_MODE` | `0` | 快速模式，牺牲部分稳健性以换取速度。 |
 
-> 安全说明：`ourwork/main.py` 当前构造 `KimiCalculusAgent` 时存在硬编码 `api_key`。维护时建议改为仅依赖环境变量，避免密钥泄露风险。
+> 安全说明：避免在代码中硬编码 `api_key`，统一使用环境变量，防止密钥泄露。
 
 ## 4. 执行链路（从入口到答案）
 
 主链路如下：
 
-1. `main.py:main()` 读取题目。
-2. `main.py:run()` 实例化 `KimiCalculusAgent`。
-3. `KimiCalculusAgent.solve()` 选择策略并求解。
-4. 返回统一 JSON，并在 CLI 打印。
+1. 评测读取 [ourwork/submission.json](ourwork/submission.json) 中的 `class` 与 `method`。
+2. 从 [ourwork/calculus_agent.py](ourwork/calculus_agent.py) 导入 `KimiCalculusAgent`。
+3. 实例化 `KimiCalculusAgent`。
+4. 调用 `solve()` 返回统一 JSON。
 
 类初始化时会做三件事：
 
@@ -269,7 +282,7 @@ python main.py "求极限 lim_{x->0} sinx/x"
 
 排查：
 
-1. `KIMI_API_KEY` 是否有效。
+1. `Kimi_API_KEY` 是否有效。
 2. 网络与代理是否可访问 `base_url`。
 3. `model` 是否可用。
 
